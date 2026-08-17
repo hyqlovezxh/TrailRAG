@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+
+# Secrets (never commit API keys)
+.env
+.env.*
+!.env.example
+
+# Runtime data (knowledge base storage)
+yusu_data/
+
+# Frontend
+yusu_webui/node_modules/
+yusu_webui/dist/
+yusu_webui/.env
+
+# Logs
+*.log
+log/
+
+# Caches / tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+temp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+/test_*

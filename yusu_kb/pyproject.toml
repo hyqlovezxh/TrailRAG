@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yusu-kb"
+version = "0.1.0"
+description = "语溯开源版：独立 YUSU 知识库系统（本地知识库 + 检索增强问答）"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "aiosqlite>=0.20",
+    "beautifulsoup4>=4.12",
+    "docx2txt>=0.8",
+    "httpx>=0.28.1",
+    "jieba>=0.42",
+    "json-repair",
+    "markdown-it-py>=3.0",
+    "mdit-py-plugins>=0.4",
+    "markdownify>=0.11",
+    "nano-vectordb",
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "openpyxl>=3.1",
+    "pipmaster",
+    "pydantic>=2.0",
+    "pymupdf>=1.24",
+    "python-dotenv",
+    "sqlalchemy[asyncio]>=2.0",
+    "tzdata>=2024.1; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.108",
+    "python-multipart",
+    "uvicorn",
+]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff",
+]
+
+[project.scripts]
+yusu-server = "yusu_kb.server:main"
+
+[tool.setuptools]
+package-dir = {"yusu_kb" = "yusu_kb/yusu_kb"}
+
+[tool.setuptools.packages.find]
+where = ["yusu_kb"]
+include = ["yusu_kb*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["yusu_kb/tests"]
+
+[tool.ruff]
+target-version = "py311"
