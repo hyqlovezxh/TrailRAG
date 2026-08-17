@@ -16,212 +16,10 @@
 <div align="center">
   <div style="width:100%;max-width:760px;margin:18px auto;padding:14px 18px;background:#fff7ed;border:1px solid #fdba74;border-radius:12px;color:#9a3412;font-size:13.5px;line-height:1.6;text-align:left;">
     <b>⚠️ Development status / 开发状态</b><br>
-    <b>EN:</b> The open-source version is <b>under active development</b>; source code will be published to this repository soon. This README documents the design, architecture, and benchmark results ahead of the code release. Install/run commands shown below are <b>planned interfaces</b>, not yet available.<br>
-    <b>中文：</b>开源版本<b>正在开发中</b>，源代码将于近期上传至本仓库。本 README 在代码发布前先行说明设计、架构与基准结论。下述安装/运行命令为<b>规划中的接口</b>，暂未提供。
+    <b>中文：</b>开源版本<b>正在开发中</b>，源代码将于近期上传至本仓库。本 README 在代码发布前先行说明设计、架构与基准结论。下述安装/运行命令为<b>规划中的接口</b>，暂未提供。<br>
+    <b>EN:</b> The open-source version is <b>under active development</b>; source code will be published to this repository soon. This README documents the design, architecture, and benchmark results ahead of the code release. Install/run commands shown below are <b>planned interfaces</b>, not yet available.
   </div>
 </div>
-
----
-
-## English Version — TrailRAG
-
-### Why TrailRAG
-
-Traditional RAG works well on clean, high-quality corpora, but it **breaks on the messy reality of investigative evidence**: chat logs are noisy, witness statements contradict each other, fund-flow and call logs are incomplete, and structured tables (CSV/XLSX) get flattened into loose text. Clues are diluted by semantic noise, field semantics are lost, there are no event nodes to hop across, and no time model to rebuild "who did what, when".
-
-**TrailRAG** is built for exactly this. It keeps a traditional vector-direct RAG channel for instant answers, and adds a **graph-augmented channel rooted in event nodes** that links chats → statements → fund flows → call logs → forensic records into a **closed, multi-hop, time-aware evidence chain** — surfacing contradictions instead of silently merging them.
-
-### Architecture
-
-```mermaid
-graph TB
-    subgraph IN["Multi-modal Evidence Input"]
-        direction TB
-        A1[Transcripts]
-        A2[Chat Logs]
-        A3[Fund Flows CSV]
-        A4[Call Records]
-        A5[ANPR / Kakou]
-        A6[Forensic JSON]
-    end
-    B[Domain-aware Chunking]
-    subgraph DUAL["Dual-Write Pipeline (parallel)"]
-        direction LR
-        C1[Vector Embedding] --> VS[(Vector Store<br/>first-search ready)]
-        C2[Graph Extraction<br/>up to 128 LLM concurrency] --> GE[Event / Entity / Relation]
-        GE --> GS[(Event Graph<br/>PPR edges 1-5 hop)]
-    end
-    Q[Retrieval Layer<br/>vector + keyword + graph + lexical]
-    F[RRF Fusion + Rerank]
-    O[Evidence Chain Output<br/>with sources + timeline]
-    IN --> B --> DUAL
-    VS --> Q
-    GS --> Q
-    Q --> F --> O
-```
-
-*Figure 1 — System architecture: a vector-direct channel and a graph-augmented channel run in parallel over mixed evidentiary data, backed by Vector / Graph / KV storage, and produce explainable, citable answers. High-res SVG: [trailrag-architecture.svg](assets/trailrag-architecture.svg)*
-
-### Features
-
-1. **Dual-engine indexing** — chunks become searchable the moment they are embedded (vector-direct), while graph augmentation builds the evidence graph in parallel; no need to wait for the full graph before the first query.
-2. **Event-node graph** — graph nodes are *events* (not just keywords/entities), making cross-source, time-ordered reasoning natural.
-3. **Multi-hop retrieval** — Personalized PageRank over the event graph (1–5 hops, default 3) plus explicit relation-chain enumeration for closed evidence.
-4. **Lexical deterministic channel** — exact identifier matching (phone / ID / case number) with a `0.85` similarity floor, so deterministic clues survive semantic noise.
-5. **Usable under low-quality data** — preserves CSV field semantics, anchors on events, and surfaces conflicting statements rather than hallucinating a single answer.
-6. **Timeline reconstruction** — recovers "who did what, when" across the whole case from time-bearing events.
-7. **Mixed data types** — chats, statements, fund-flow CSV, call logs, ANPR/Kakou, forensic JSON, and Office documents.
-8. **Explainable output** — every answer carries source citations and a reconstructable evidence path.
-9. **High indexing speed** — up to 128 concurrent LLM extraction calls with bounded graph-write concurrency and cross-chunk batch flush.
-10. **Pluggable storage** — Vector DB, Graph DB, and KV Store are swappable (e.g. Milvus / Neo4j / PostgreSQL).
-
-### Workflow
-
-**Indexing (dual-engine, in parallel)**
-
-```mermaid
-flowchart LR
-    D[Documents] --> CH[Domain Chunking]
-    CH --> P1[Vector Embedding]
-    CH --> P2[Graph Extraction<br/>Semaphore cap = 128]
-    P1 --> VS[(Vector Store<br/>answerable immediately)]
-    P2 --> GE[Entity / Event / Relation]
-    GE --> GF[Batch Flush<br/>write concurrency = 10]
-    GF --> GS[(Graph Store)]
-    P1 -. optional graph overlay .-> GS
-    style VS fill:#4ecdc4,color:#1a1a2e
-    style GS fill:#00d9ff,color:#1a1a2e
-```
-
-*Figure 2 — Indexing flow. The vector-direct channel answers fast; the graph-augmented channel extracts event nodes with up to 128 concurrent LLM calls and bounded graph-write concurrency (10), flushing in cross-chunk batches. High-res SVG: [trailrag-indexing.svg](assets/trailrag-indexing.svg)*
-
-**Query**
-
-```mermaid
-flowchart TD
-    Q0[Query] --> M{search_mode}
-    M -->|vector / keyword / hybrid| V[Vector + Lexical Retrieval<br/>orthogonal toggle]
-    M --> G{use_graph_retrieval?}
-    G -->|yes| P[PPR 1-5 hop<br/>+ relation_chains]
-    G -->|no| S[Vector-only fast path]
-    V --> R[Deterministic Floor<br/>phone / id exact 0.85]
-    P --> R
-    R --> F[RRF Fusion K=60]
-    F --> RK[Rerank]
-    RK --> O[Evidence Chain + Sources + Timeline]
-    style O fill:#4ecdc4,color:#1a1a2e
-```
-
-*Figure 3 — Query flow. Vector/keyword retrieval runs first as an orthogonal toggle; optional graph PPR (1–5 hops), relation-chain enumeration, and the lexical deterministic floor (0.85) are fused via RRF (K=60) and reranked into a closed evidence chain. High-res SVG: [trailrag-query.svg](assets/trailrag-query.svg)*
-
-### Principle: usable under low-quality data
-
-```mermaid
-flowchart TB
-    subgraph TRAD["Traditional RAG under low-quality data"]
-        T1[Raw chunks to vectors]
-        T2[Noisy / conflicting inputs]
-        T3[Lost clues, fields, timeline<br/>false merges]
-        T1 --> T3
-        T2 --> T3
-    end
-    subgraph TRAIL["TrailRAG / YuSuRAG"]
-        L1[Domain chunking keeps field semantics]
-        L2[Vector direct-use + Event graph + Lexical floor]
-        L3[Cross-source verify, timeline rebuild, exact hit]
-        L1 --> L2 --> L3
-    end
-    style TRAD fill:#3a1a1a,color:#ffb4b4
-    style TRAIL fill:#16263a,color:#9fe8ff
-```
-
-*Figure 4 — Under noisy, contradictory evidence, traditional RAG loses clues, fields, and time; TrailRAG traces through via event nodes, a lexical deterministic floor, preserved field semantics, and closed multi-hop chains. High-res SVG: [trailrag-principle.svg](assets/trailrag-principle.svg)*
-
-### Quick Start (planned)
-
-> Source code is not yet published. The interface below reflects the **planned** design.
-
-```bash
-# Planned: install
-# pip install trailrag        # or: uv pip install trailrag
-
-# Planned: build an index from mixed evidence
-from trailrag import TrailRAG
-
-rag = TrailRAG(
-    working_dir="./case_index",
-    llm="openai-compatible-endpoint",
-    embedding="openai-compatible-embedding",
-)
-await rag.insert_files(["./evidence/"])   # chats, statements, csv, json, xlsx ...
-
-# Planned: query with graph augmentation on
-answer = await rag.query(
-    "who lured the victim into the transfer on 2026-03-12, and which bank card?",
-    use_graph_retrieval=True,        # optional graph multi-hop
-    search_mode="hybrid",           # vector / keyword / hybrid
-)
-print(answer.text, answer.citations)  # explainable evidence chain
-```
-
-### Key Configuration
-
-| Parameter | Meaning | Default |
-|---|---|---|
-| `search_mode` | vector / keyword / hybrid (orthogonal to graph) | `hybrid` |
-| `use_graph_retrieval` | enable graph multi-hop channel | `True` |
-| LLM extraction concurrency | max parallel LLM calls for graph build | `128` |
-| `GRAPH_WRITE_CONCURRENCY_LIMIT` | bounded graph-write concurrency | `10` |
-| PPR hops | multi-hop depth on event graph | `1–5` (default `3`) |
-| lexical `exact_score_floor` | deterministic identifier match floor | `0.85` |
-| RRF `K` | reciprocal-rank fusion constant | `60` |
-| `MAX_ENTITY/RELATION/TOTAL_TOKENS` | recall context token budget | tunable |
-
-*Parameters reflect the current design/implementation; final names may change before release.*
-
-### Benchmarks
-
-TrailRAG has been compared, line-by-line at the source-code level, against LightRAG and Microsoft GraphRAG across retrieval accuracy, indexing speed, multi-hop reasoning, token efficiency, robustness, and an evidentiary mining track on low-quality data.
-
-📊 **Full report:** [RAG三套知识库权威对比分析报告（语溯RAG vs LightRAG vs GraphRAG）](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
-
-Headline (purpose-weighted, evidentiary/low-quality scenario): **TrailRAG 94.4% · LightRAG 80.2% · GraphRAG 67.4%**. TrailRAG leads in retrieval accuracy, indexing speed, multi-hop reasoning, and the evidentiary-mining track; it is intentionally scored lower than general-purpose frameworks on code robustness / token efficiency / error tolerance, where those frameworks' broader engineering maturity shows.
-
-### Roadmap
-
-- [ ] Publish core source (vector-direct + graph-augmented engine)
-- [ ] WebUI for insert / query / visualize the evidence graph
-- [ ] Pluggable storage adapters (Milvus / Neo4j / PostgreSQL)
-- [ ] English + Chinese documentation site
-- [ ] Public benchmark scripts on `fraud_case_v1`-style datasets
-- [ ] License finalization
-
-### Documentation
-
-- 📊 Benchmark & comparison report (this repo): [RAG三套知识库权威对比分析报告](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
-- Architecture and workflow diagrams (Mermaid sources): see the code blocks above; high-res SVG versions: [assets/](./assets/)
-
-### Contributing
-
-Contributions are welcome once the source is published. Please read `CONTRIBUTING.md` before opening a pull request.
-
-### Citation
-
-```bibtex
-@misc{trailrag2026,
-  title        = {TrailRAG: Trace every clue — evidentiary, multi-hop, time-aware retrieval},
-  author       = {TrailRAG Authors},
-  year         = {2026},
-  howpublished = {\url{https://github.com/your-org/TrailRAG}},
-  note         = {Under active development; source to be released}
-}
-```
-
-> Replace `your-org/TrailRAG` with the final repository path after publication.
-
-### Acknowledgements
-
-TrailRAG stands on the shoulders of the open-source RAG community (LightRAG, GraphRAG, and others). The benchmark report compares designs at the source level for transparency; all systems are credited for their respective strengths.
 
 ---
 
@@ -414,13 +212,211 @@ print(answer.text, answer.citations)  # 可解释证据链
   title        = {语溯RAG：循迹每一处线索——带证据链、多跳、时序感知的检索增强生成},
   author       = {语溯RAG 作者团队},
   year         = {2026},
-  howpublished = {\url{https://github.com/your-org/TrailRAG}},
+  howpublished = {\url{https://github.com/hyqlovezxh/TrailRAG}},
   note         = {开源版本开发中，源码待发布}
 }
 ```
 
-> 发布后请将 `your-org/TrailRAG` 替换为最终仓库路径。
-
 ### 致谢
 
 语溯RAG 站在开源 RAG 社区（LightRAG、GraphRAG 等）的肩膀上。对比报告在源码层透明比较各家设计，并如实认可各系统的优势。
+
+---
+
+## English Version — TrailRAG
+
+### Why TrailRAG
+
+Traditional RAG works well on clean, high-quality corpora, but it **breaks on the messy reality of investigative evidence**: chat logs are noisy, witness statements contradict each other, fund-flow and call logs are incomplete, and structured tables (CSV/XLSX) get flattened into loose text. Clues are diluted by semantic noise, field semantics are lost, there are no event nodes to hop across, and no time model to rebuild "who did what, when".
+
+**TrailRAG** is built for exactly this. It keeps a traditional vector-direct RAG channel for instant answers, and adds a **graph-augmented channel rooted in event nodes** that links chats → statements → fund flows → call logs → forensic records into a **closed, multi-hop, time-aware evidence chain** — surfacing contradictions instead of silently merging them.
+
+### Architecture
+
+```mermaid
+graph TB
+    subgraph IN["Multi-modal Evidence Input"]
+        direction TB
+        A1[Transcripts]
+        A2[Chat Logs]
+        A3[Fund Flows CSV]
+        A4[Call Records]
+        A5[ANPR / Kakou]
+        A6[Forensic JSON]
+    end
+    B[Domain-aware Chunking]
+    subgraph DUAL["Dual-Write Pipeline (parallel)"]
+        direction LR
+        C1[Vector Embedding] --> VS[(Vector Store<br/>first-search ready)]
+        C2[Graph Extraction<br/>up to 128 LLM concurrency] --> GE[Event / Entity / Relation]
+        GE --> GS[(Event Graph<br/>PPR edges 1-5 hop)]
+    end
+    Q[Retrieval Layer<br/>vector + keyword + graph + lexical]
+    F[RRF Fusion + Rerank]
+    O[Evidence Chain Output<br/>with sources + timeline]
+    IN --> B --> DUAL
+    VS --> Q
+    GS --> Q
+    Q --> F --> O
+```
+
+*Figure 1 — System architecture: a vector-direct channel and a graph-augmented channel run in parallel over mixed evidentiary data, backed by Vector / Graph / KV storage, and produce explainable, citable answers. High-res SVG: [trailrag-architecture.svg](assets/trailrag-architecture.svg)*
+
+### Features
+
+1. **Dual-engine indexing** — chunks become searchable the moment they are embedded (vector-direct), while graph augmentation builds the evidence graph in parallel; no need to wait for the full graph before the first query.
+2. **Event-node graph** — graph nodes are *events* (not just keywords/entities), making cross-source, time-ordered reasoning natural.
+3. **Multi-hop retrieval** — Personalized PageRank over the event graph (1–5 hops, default 3) plus explicit relation-chain enumeration for closed evidence.
+4. **Lexical deterministic channel** — exact identifier matching (phone / ID / case number) with a `0.85` similarity floor, so deterministic clues survive semantic noise.
+5. **Usable under low-quality data** — preserves CSV field semantics, anchors on events, and surfaces conflicting statements rather than hallucinating a single answer.
+6. **Timeline reconstruction** — recovers "who did what, when" across the whole case from time-bearing events.
+7. **Mixed data types** — chats, statements, fund-flow CSV, call logs, ANPR/Kakou, forensic JSON, and Office documents.
+8. **Explainable output** — every answer carries source citations and a reconstructable evidence path.
+9. **High indexing speed** — up to 128 concurrent LLM extraction calls with bounded graph-write concurrency and cross-chunk batch flush.
+10. **Pluggable storage** — Vector DB, Graph DB, and KV Store are swappable (e.g. Milvus / Neo4j / PostgreSQL).
+
+### Workflow
+
+**Indexing (dual-engine, in parallel)**
+
+```mermaid
+flowchart LR
+    D[Documents] --> CH[Domain Chunking]
+    CH --> P1[Vector Embedding]
+    CH --> P2[Graph Extraction<br/>Semaphore cap = 128]
+    P1 --> VS[(Vector Store<br/>answerable immediately)]
+    P2 --> GE[Entity / Event / Relation]
+    GE --> GF[Batch Flush<br/>write concurrency = 10]
+    GF --> GS[(Graph Store)]
+    P1 -. optional graph overlay .-> GS
+    style VS fill:#4ecdc4,color:#1a1a2e
+    style GS fill:#00d9ff,color:#1a1a2e
+```
+
+*Figure 2 — Indexing flow. The vector-direct channel answers fast; the graph-augmented channel extracts event nodes with up to 128 concurrent LLM calls and bounded graph-write concurrency (10), flushing in cross-chunk batches. High-res SVG: [trailrag-indexing.svg](assets/trailrag-indexing.svg)*
+
+**Query**
+
+```mermaid
+flowchart TD
+    Q0[Query] --> M{search_mode}
+    M -->|vector / keyword / hybrid| V[Vector + Lexical Retrieval<br/>orthogonal toggle]
+    M --> G{use_graph_retrieval?}
+    G -->|yes| P[PPR 1-5 hop<br/>+ relation_chains]
+    G -->|no| S[Vector-only fast path]
+    V --> R[Deterministic Floor<br/>phone / id exact 0.85]
+    P --> R
+    R --> F[RRF Fusion K=60]
+    F --> RK[Rerank]
+    RK --> O[Evidence Chain + Sources + Timeline]
+    style O fill:#4ecdc4,color:#1a1a2e
+```
+
+*Figure 3 — Query flow. Vector/keyword retrieval runs first as an orthogonal toggle; optional graph PPR (1–5 hops), relation-chain enumeration, and the lexical deterministic floor (0.85) are fused via RRF (K=60) and reranked into a closed evidence chain. High-res SVG: [trailrag-query.svg](assets/trailrag-query.svg)*
+
+### Principle: usable under low-quality data
+
+```mermaid
+flowchart TB
+    subgraph TRAD["Traditional RAG under low-quality data"]
+        T1[Raw chunks to vectors]
+        T2[Noisy / conflicting inputs]
+        T3[Lost clues, fields, timeline<br/>false merges]
+        T1 --> T3
+        T2 --> T3
+    end
+    subgraph TRAIL["TrailRAG / YuSuRAG"]
+        L1[Domain chunking keeps field semantics]
+        L2[Vector direct-use + Event graph + Lexical floor]
+        L3[Cross-source verify, timeline rebuild, exact hit]
+        L1 --> L2 --> L3
+    end
+    style TRAD fill:#3a1a1a,color:#ffb4b4
+    style TRAIL fill:#16263a,color:#9fe8ff
+```
+
+*Figure 4 — Under noisy, contradictory evidence, traditional RAG loses clues, fields, and time; TrailRAG traces through via event nodes, a lexical deterministic floor, preserved field semantics, and closed multi-hop chains. High-res SVG: [trailrag-principle.svg](assets/trailrag-principle.svg)*
+
+### Quick Start (planned)
+
+> Source code is not yet published. The interface below reflects the **planned** design.
+
+```bash
+# Planned: install
+# pip install trailrag        # or: uv pip install trailrag
+
+# Planned: build an index from mixed evidence
+from trailrag import TrailRAG
+
+rag = TrailRAG(
+    working_dir="./case_index",
+    llm="openai-compatible-endpoint",
+    embedding="openai-compatible-embedding",
+)
+await rag.insert_files(["./evidence/"])   # chats, statements, csv, json, xlsx ...
+
+# Planned: query with graph augmentation on
+answer = await rag.query(
+    "who lured the victim into the transfer on 2026-03-12, and which bank card?",
+    use_graph_retrieval=True,        # optional graph multi-hop
+    search_mode="hybrid",           # vector / keyword / hybrid
+)
+print(answer.text, answer.citations)  # explainable evidence chain
+```
+
+### Key Configuration
+
+| Parameter | Meaning | Default |
+|---|---|---|
+| `search_mode` | vector / keyword / hybrid (orthogonal to graph) | `hybrid` |
+| `use_graph_retrieval` | enable graph multi-hop channel | `True` |
+| LLM extraction concurrency | max parallel LLM calls for graph build | `128` |
+| `GRAPH_WRITE_CONCURRENCY_LIMIT` | bounded graph-write concurrency | `10` |
+| PPR hops | multi-hop depth on event graph | `1–5` (default `3`) |
+| lexical `exact_score_floor` | deterministic identifier match floor | `0.85` |
+| RRF `K` | reciprocal-rank fusion constant | `60` |
+| `MAX_ENTITY/RELATION/TOTAL_TOKENS` | recall context token budget | tunable |
+
+*Parameters reflect the current design/implementation; final names may change before release.*
+
+### Benchmarks
+
+TrailRAG has been compared, line-by-line at the source-code level, against LightRAG and Microsoft GraphRAG across retrieval accuracy, indexing speed, multi-hop reasoning, token efficiency, robustness, and an evidentiary mining track on low-quality data.
+
+📊 **Full report:** [RAG三套知识库权威对比分析报告（语溯RAG vs LightRAG vs GraphRAG）](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
+
+Headline (purpose-weighted, evidentiary/low-quality scenario): **TrailRAG 94.4% · LightRAG 80.2% · GraphRAG 67.4%**. TrailRAG leads in retrieval accuracy, indexing speed, multi-hop reasoning, and the evidentiary-mining track; it is intentionally scored lower than general-purpose frameworks on code robustness / token efficiency / error tolerance, where those frameworks' broader engineering maturity shows.
+
+### Roadmap
+
+- [ ] Publish core source (vector-direct + graph-augmented engine)
+- [ ] WebUI for insert / query / visualize the evidence graph
+- [ ] Pluggable storage adapters (Milvus / Neo4j / PostgreSQL)
+- [ ] English + Chinese documentation site
+- [ ] Public benchmark scripts on `fraud_case_v1`-style datasets
+- [ ] License finalization
+
+### Documentation
+
+- 📊 Benchmark & comparison report (this repo): [RAG三套知识库权威对比分析报告](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
+- Architecture and workflow diagrams (Mermaid sources): see the code blocks above; high-res SVG versions: [assets/](./assets/)
+
+### Contributing
+
+Contributions are welcome once the source is published. Please read `CONTRIBUTING.md` before opening a pull request.
+
+### Citation
+
+```bibtex
+@misc{trailrag2026,
+  title        = {TrailRAG: Trace every clue — evidentiary, multi-hop, time-aware retrieval},
+  author       = {TrailRAG Authors},
+  year         = {2026},
+  howpublished = {\url{https://github.com/hyqlovezxh/TrailRAG}},
+  note         = {Under active development; source to be released}
+}
+```
+
+### Acknowledgements
+
+TrailRAG stands on the shoulders of the open-source RAG community (LightRAG, GraphRAG, and others). The benchmark report compares designs at the source level for transparency; all systems are credited for their respective strengths.
