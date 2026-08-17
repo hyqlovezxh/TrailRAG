@@ -13,14 +13,6 @@
 
 </div>
 
-<div align="center">
-  <div style="width:100%;max-width:760px;margin:18px auto;padding:14px 18px;background:#fff7ed;border:1px solid #fdba74;border-radius:12px;color:#9a3412;font-size:13.5px;line-height:1.6;text-align:left;">
-    <b>⚠️ Development status / 开发状态</b><br>
-    <b>中文：</b>开源版本<b>正在开发中</b>，源代码将于近期上传至本仓库。本 README 在代码发布前先行说明设计、架构与基准结论。下述安装/运行命令为<b>规划中的接口</b>，暂未提供。<br>
-    <b>EN:</b> The open-source version is <b>under active development</b>; source code will be published to this repository soon. This README documents the design, architecture, and benchmark results ahead of the code release. Install/run commands shown below are <b>planned interfaces</b>, not yet available.
-  </div>
-</div>
-
 ---
 
 ## 中文版 — 语溯RAG
