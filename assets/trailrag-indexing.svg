@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/></marker>
+    <marker id="b" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#0ea5e9"/></marker>
+    <marker id="c" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#6366f1"/></marker>
+  </defs>
+  <rect width="960" height="540" fill="#ffffff"/>
+  <text x="480" y="32" text-anchor="middle" font-size="19" font-weight="700" fill="#0f172a">TrailRAG — Indexing Flow / 入库流程（双机制并行）</text>
+  <text x="480" y="50" text-anchor="middle" font-size="12" fill="#64748b">Vector-direct answers fast · graph augmentation runs in parallel</text>
+
+  <!-- input -->
+  <rect x="330" y="66" width="300" height="50" rx="10" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="480" y="90" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">Documents in (mixed evidence)</text>
+  <text x="480" y="108" text-anchor="middle" font-size="10.5" fill="#64748b">chats · statements · csv · json · xlsx</text>
+
+  <!-- parse/chunk -->
+  <rect x="330" y="140" width="300" height="50" rx="10" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="480" y="164" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">Parse &amp; Chunk / 解析分块</text>
+  <text x="480" y="182" text-anchor="middle" font-size="10.5" fill="#64748b">domain-aware chunking preserves fields</text>
+
+  <line x1="480" y1="190" x2="250" y2="212" stroke="#0ea5e9" stroke-width="1.5" marker-end="url(#b)"/>
+  <line x1="480" y1="190" x2="710" y2="212" stroke="#6366f1" stroke-width="1.5" marker-end="url(#c)"/>
+
+  <!-- left channel: vector-direct -->
+  <rect x="60" y="212" width="380" height="118" rx="10" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="1.5"/>
+  <text x="80" y="234" font-size="13" font-weight="700" fill="#0369a1">① Vector-direct channel</text>
+  <text x="80" y="258" font-size="11.5" fill="#0c4a6e">Embed chunks → Vector DB</text>
+  <text x="80" y="282" font-size="11.5" fill="#0c4a6e">Becomes searchable immediately</text>
+  <text x="80" y="306" font-size="11" fill="#075985">low time-to-first-search (no graph wait)</text>
+  <rect x="80" y="316" width="340" height="6" rx="3" fill="#bae6fd"/>
+
+  <!-- right channel: graph -->
+  <rect x="520" y="212" width="380" height="200" rx="10" fill="#ede9fe" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="540" y="234" font-size="13" font-weight="700" fill="#4338ca">② Graph-augmented channel</text>
+  <text x="540" y="258" font-size="11.5" fill="#312e81">Event-node extraction</text>
+  <text x="540" y="280" font-size="11.5" fill="#312e81">LLM concurrency cap = 128</text>
+  <text x="540" y="302" font-size="11.5" fill="#312e81">Graph write concurrency = 10</text>
+  <text x="540" y="324" font-size="11.5" fill="#312e81">cross-chunk batch flush</text>
+  <text x="540" y="348" font-size="11" fill="#3730a3">PPR edges + lexical IDs + relations</text>
+  <text x="540" y="372" font-size="11" fill="#3730a3">→ Event Graph (multi-hop ready)</text>
+  <rect x="540" y="384" width="340" height="6" rx="3" fill="#ddd6fe"/>
+
+  <!-- event graph store -->
+  <rect x="520" y="436" width="380" height="48" rx="10" fill="#ccfbf1" stroke="#14b8a6" stroke-width="1.5"/>
+  <text x="710" y="465" text-anchor="middle" font-size="12.5" font-weight="700" fill="#0f766e">Event Graph DB (vector + graph + KV)</text>
+
+  <!-- merge -->
+  <rect x="330" y="436" width="300" height="48" rx="10" fill="#fef9c3" stroke="#eab308" stroke-width="1.5"/>
+  <text x="480" y="465" text-anchor="middle" font-size="12.5" font-weight="700" fill="#854d0e">Indexed &amp; ready / 索引就绪</text>
+
+  <line x1="250" y1="330" x2="480" y2="436" stroke="#0ea5e9" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="900" y1="336" x2="710" y2="436" stroke="#6366f1" stroke-width="1.5" marker-end="url(#a)"/>
+</svg>

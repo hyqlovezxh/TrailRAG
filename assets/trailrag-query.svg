@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/></marker>
+    <marker id="b" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#0ea5e9"/></marker>
+    <marker id="c" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#6366f1"/></marker>
+  </defs>
+  <rect width="960" height="540" fill="#ffffff"/>
+  <text x="480" y="32" text-anchor="middle" font-size="19" font-weight="700" fill="#0f172a">TrailRAG — Query Flow / 检索流程</text>
+  <text x="480" y="50" text-anchor="middle" font-size="12" fill="#64748b">vector/keyword first · optional graph multi-hop · closed evidence chain</text>
+
+  <!-- query -->
+  <rect x="360" y="64" width="240" height="46" rx="10" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="480" y="92" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">Query / 查询</text>
+
+  <!-- vector/keyword (runs first) -->
+  <rect x="60" y="138" width="360" height="86" rx="10" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="1.5"/>
+  <text x="80" y="160" font-size="13" font-weight="700" fill="#0369a1">Vector / Keyword retrieval (runs first)</text>
+  <text x="80" y="184" font-size="11.5" fill="#0c4a6e">search_mode ∈ {vector, keyword, hybrid}</text>
+  <text x="80" y="208" font-size="11" fill="#075985">orthogonal toggle → instant base context</text>
+
+  <!-- decision -->
+  <polygon points="690,150 770,181 690,212 610,181" fill="#ede9fe" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="690" y="178" text-anchor="middle" font-size="11" font-weight="700" fill="#4338ca">use_graph</text>
+  <text x="690" y="193" text-anchor="middle" font-size="11" font-weight="700" fill="#4338ca">?</text>
+
+  <!-- graph sub-flow -->
+  <rect x="520" y="240" width="400" height="120" rx="10" fill="#ede9fe" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="540" y="262" font-size="13" font-weight="700" fill="#4338ca">Graph retrieval (optional)</text>
+  <text x="540" y="286" font-size="11.5" fill="#312e81">PPR multi-hop 1–5 hops (default 3)</text>
+  <text x="540" y="310" font-size="11.5" fill="#312e81">relation-chain enumeration</text>
+  <text x="540" y="334" font-size="11.5" fill="#312e81">lexical deterministic floor = 0.85 (IDs)</text>
+
+  <!-- RRF fuse -->
+  <rect x="320" y="384" width="320" height="48" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="480" y="413" text-anchor="middle" font-size="12.5" font-weight="700" fill="#4338ca">RRF fusion (K=60) + rerank</text>
+
+  <!-- evidence chain + answer -->
+  <rect x="320" y="448" width="320" height="48" rx="10" fill="#fef9c3" stroke="#eab308" stroke-width="1.5"/>
+  <text x="480" y="477" text-anchor="middle" font-size="12.5" font-weight="700" fill="#854d0e">Evidence chain → Answer + citations</text>
+
+  <line x1="480" y1="110" x2="240" y2="138" stroke="#0ea5e9" stroke-width="1.5" marker-end="url(#b)"/>
+  <line x1="480" y1="110" x2="690" y2="150" stroke="#6366f1" stroke-width="1.5" marker-end="url(#c)"/>
+  <line x1="690" y1="212" x2="720" y2="240" stroke="#6366f1" stroke-width="1.5" marker-end="url(#c)"/>
+  <line x1="240" y1="224" x2="420" y2="384" stroke="#0ea5e9" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="720" y1="360" x2="640" y2="384" stroke="#6366f1" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="480" y1="432" x2="480" y2="448" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+</svg>
