@@ -440,9 +440,3 @@ This project references code from the following open-source repositories, credit
 - **[LightRAG](https://github.com/HKUDS/LightRAG)** — referenced for its graph WebUI implementation approach; also a comparison target of this repo.
 
 Architecture design also draws on **[Microsoft GraphRAG](https://github.com/microsoft/graphrag)** for comparison purposes.
-This project references code from the following open-source repositories, credited in accordance with their respective licenses:
-
-- **[Yuxi](https://github.com/xerrors/Yuxi)** — referenced for knowledge-base / knowledge-graph building and retrieval capabilities.
-- **[LightRAG](https://github.com/HKUDS/LightRAG)** — referenced for its graph WebUI implementation approach; also a comparison target of this repo.
-
-Architecture design also draws on **[Microsoft GraphRAG](https://github.com/microsoft/graphrag)** for comparison purposes.
