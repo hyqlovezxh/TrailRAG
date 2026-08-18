@@ -236,30 +236,32 @@ class OtherEmbedding(BaseEmbeddingModel):
             raise ValueError(f"Embedding failed: Invalid response format {result}")
         return [item["embedding"] for item in result["data"]]
 
-    def _get_async_client(self) -> httpx.AsyncClient:
-        """获取或创建复用的 AsyncClient，共享 TCP 连接池"""
-        if self._client is None or self._client.is_closed:
-            kwargs = {"timeout": 60}
-            if self._transport is not None:
-                kwargs["transport"] = self._transport
-            self._client = httpx.AsyncClient(**kwargs)
-        return self._client
+    def _make_client(self) -> httpx.AsyncClient:
+        """每次请求创建独立 AsyncClient（绑定当前事件循环）。
+
+        旧实现复用模块级单一客户端，在 Windows proactor 下会因
+        跨事件循环复用（如启动期探测线程创建的客户端随线程 loop 关闭而失效）
+        触发 ``Event loop is closed``。改为每次请求独立创建并随请求关闭，
+        彻底消除该竞态，且仍透传测试用 MockTransport。
+        """
+        kwargs: dict = {"timeout": 60}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        return httpx.AsyncClient(**kwargs)
 
     async def close_async_client(self) -> None:
-        """关闭复用 AsyncClient，在应用关闭时调用"""
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
-            self._client = None
+        """兼容性保留：当前为每次请求独立客户端，无需持久化关闭，置空占位即可。"""
+        self._client = None
 
     async def aencode(self, message: list[str] | str) -> list[list[float]]:
         payload = self.build_payload(message)
-        client = self._get_async_client()
         retry_index = 0
         while True:
             try:
-                response = await client.post(self.base_url, json=payload, headers=self.headers, timeout=60)
-                response.raise_for_status()
-                return self._extract_embeddings(response.json())
+                async with self._make_client() as client:
+                    response = await client.post(self.base_url, json=payload, headers=self.headers, timeout=60)
+                    response.raise_for_status()
+                    return self._extract_embeddings(response.json())
             except httpx.HTTPStatusError as e:
                 retry = self._prepare_retry(
                     message,
@@ -287,6 +289,43 @@ def _env_value(*names: str, default: str | None = None) -> str | None:
         if value:
             return value
     return default
+
+
+def _normalize_endpoint(base_url: str, suffix: str) -> str:
+    """将 provider base URL 规范化为完整的 OpenAI 风格端点。
+
+    接受带或不带 ``/v1`` 后缀的 base，统一产出 ``<base>/v1/<suffix>``
+    （URL 已以该 suffix 结尾时原样保留）。``.env`` 可只填裸主机，代码仍命中
+    各厂商的 ``/v1`` 路由。
+    """
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return base
+    if base.endswith(suffix):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/{suffix}"
+    return f"{base}/v1/{suffix}"
+
+
+def _sync_probe_dimension(model: BaseEmbeddingModel) -> int:
+    """在可能已有事件循环运行的环境中同步探测 embedding 维度。
+
+    无运行 loop 时直接用 ``asyncio.run``；已有 loop 时在新线程内运行独立
+    loop，避免 ``asyncio.run`` 与外层事件循环冲突。
+    """
+    import asyncio as _asyncio
+    import concurrent.futures as _cf
+
+    def _run() -> int:
+        return _asyncio.run(model.probe_dimension())
+
+    try:
+        _asyncio.get_running_loop()
+    except RuntimeError:
+        return _run()
+    with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run).result()
 
 
 def _build_embedding_model_from_spec(default_spec: str) -> OtherEmbedding:
@@ -327,8 +366,7 @@ def create_embedding_model(*, default_spec: str | None = None) -> OtherEmbedding
     api_key = _env_value("YUSU_EMBED_API_KEY", "YUSU_LLM_API_KEY") or ""
     dimension = _env_value("YUSU_EMBED_DIM")
     batch_size = int(_env_value("YUSU_EMBED_BATCH_SIZE", default="40") or 40)
-    if not base_url.endswith("/embeddings"):
-        base_url = base_url.rstrip("/") + "/embeddings"
+    base_url = _normalize_endpoint(base_url, "embeddings")
     return OtherEmbedding(
         model=model,
         base_url=base_url,
@@ -372,6 +410,10 @@ def create_default_embedding_func(
 
     model = create_embedding_model()
     final_dim = int(embedding_dim or model.dimension or 0) or None
+    if final_dim is None:
+        # README 承诺 "YUSU_EMBED_DIM 留空自动探测"：维度缺失时安全探测，
+        # 失败再抛错（而非无条件抛 "无法确定 embedding 维度"）。
+        final_dim = _sync_probe_dimension(model)
 
     async def _embed(texts, **_kwargs):
         if isinstance(texts, str):

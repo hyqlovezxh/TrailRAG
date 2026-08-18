@@ -27,6 +27,10 @@ dependencies = [
     "pydantic>=2.0",
     "pymupdf>=1.24",
     "python-dotenv",
+    # networkx>=3 delegates pagerank to scipy's sparse solver. Without scipy the
+    # personalized-PageRank graph retrieval silently degrades to 2hop/1hop seed
+    # lookup, measurably hurting recall — so scipy is required, not optional.
+    "scipy>=1.11",
     "sqlalchemy[asyncio]>=2.0",
     "tzdata>=2024.1; platform_system == 'Windows'",
 ]

@@ -886,6 +886,10 @@ class GraphService:
                     f"mark_graph_indexed failed for {item.chunk.chunk_id} "
                     f"(persist succeeded, will be reconciled by next build): {mark_exc}"
                 )
+        # 图本体与向量库/索引标记同步落盘：这些 chunk 已 mark_graph_indexed，
+        # 若此时进程崩溃或构建以失败收尾（存在失败 chunk），内存图尚未保存会导致
+        # 已索引 chunk 的图数据不可恢复。每批 flush 即 save，与向量库节奏一致。
+        storage.save()
         return succeeded, failed_chunk_ids
 
     def _persist_chunk_graph(self, storage: NetworkXGraphStorage, item: _PendingGraphWrite) -> None:

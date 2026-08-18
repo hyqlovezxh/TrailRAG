@@ -15,6 +15,7 @@ from yusu_kb.models.chat import OpenAIChatAdapter, create_chat_model
 from yusu_kb.models.rerank import BaseReranker, create_reranker
 from yusu_kb.repositories import configure_repositories
 from yusu_kb.storage.sqlite.engine import create_engine, dispose, get_data_dir, init_db
+from yusu_kb.utils.logger import logger
 
 # Load the local .env (gitignored) once at import time.
 load_dotenv()
@@ -85,12 +86,36 @@ async def _get_default_model_spec(model_type: str) -> str | None:
 
 
 async def get_chat_model() -> OpenAIChatAdapter:
-    """Lazily create the shared chat model adapter (AppConfig spec first, env fallback)."""
+    """Lazily create the shared chat model adapter.
+
+    AppConfig 中的 ``default_chat_model_spec`` 作为可选的 UI 覆盖项优先；
+    未配置、解析失败（如引用了不存在的内置 provider）或密钥缺失时，自动
+    回退到 ``.env`` 的 ``YUSU_LLM_*`` 环境变量，保证纯 env 部署开箱即用。
+    """
     global _chat_model
     if _chat_model is None:
         async with _chat_model_lock:
             if _chat_model is None:
-                _chat_model = create_chat_model(default_spec=await _get_default_model_spec("chat"))
+                model: OpenAIChatAdapter | None = None
+                spec = await _get_default_model_spec("chat")
+                if spec:
+                    try:
+                        candidate = create_chat_model(default_spec=spec)
+                        # spec 解析成功但密钥为空（如内置/已落库 provider 的 key 走 env
+                        # 且未配置）时，仍回退到 .env，避免戴着空 key 的请求必然 401。
+                        if candidate.api_key:
+                            model = candidate
+                        else:
+                            logger.warning(
+                                f"default_chat_model_spec='{spec}' 解析成功但 api_key 为空，回退到 .env"
+                            )
+                            model = None
+                    except Exception as e:  # noqa: BLE001 - spec 解析失败须回退 env，而非阻断全部请求
+                        logger.warning(f"default_chat_model_spec='{spec}' 解析失败，回退到 .env: {e}")
+                        model = None
+                if model is None:
+                    model = create_chat_model()  # env 路径
+                _chat_model = model
                 # KG-9: 图谱抽取/合并必须注入流式收集器 call_collect（read timeout 随每个
                 # token 重置），非流式 call 的 120s 硬超时会在大 JSON 生成时误杀长请求
                 set_default_graph_chat_model_fn(_chat_model.call_collect)

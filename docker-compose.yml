@@ -1,0 +1,41 @@
+# 语溯开源版（YUSU / TrailRAG）容器编排
+#
+# 首次使用：
+#   1) cp env.example .env  并填写模型密钥
+#   2) docker compose up -d --build
+#   3) 浏览器打开 http://127.0.0.1:8920/
+#
+# 常用命令：
+#   docker compose logs -f yusu          # 查看日志
+#   docker compose exec yusu python scripts/doctor.py   # 容器内环境自检
+#   docker compose down                  # 停止（数据保留在 volume）
+
+services:
+  yusu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yusu-kb:latest
+    container_name: yusu-kb
+    restart: unless-stopped
+    # 密钥只从 .env 注入，不写进 compose 文件
+    env_file:
+      - .env
+    environment:
+      YUSU_HOST: 0.0.0.0
+      YUSU_PORT: 8920
+      YUSU_DATA_DIR: /app/yusu_data
+    ports:
+      - "127.0.0.1:8920:8920"
+    volumes:
+      # 知识库文件、向量库、SQLite 全部落在这里，删容器不丢数据
+      - yusu_data:/app/yusu_data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8920/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  yusu_data:

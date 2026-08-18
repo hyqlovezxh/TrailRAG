@@ -296,9 +296,9 @@ class Parser:
 
         engine = _ENGINE_BY_EXTENSION[ext]
         if ext in {".xlsx", ".csv"}:
-            engine_func = lambda p: engine(p, table_to_markdown)  # noqa: E731
+            engine_func = lambda p: engine(p, table_to_markdown)
         elif ext == ".zip":
-            engine_func = lambda p: engine(p, images_dir)  # noqa: E731
+            engine_func = lambda p: engine(p, images_dir)
         else:
             engine_func = engine
 

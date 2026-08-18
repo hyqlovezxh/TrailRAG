@@ -104,7 +104,7 @@ def rank_chunks_by_ppr(
             personalization=reset,
             weight="weight",
         )
-    except Exception as e:  # noqa: BLE001 - pagerank 失败降级 2hop/1hop，不阻断检索
+    except Exception as e:  # noqa: BLE001 - pagerank 失败须降级 2hop/1hop，不能阻断检索
         logger.warning("PPR pagerank failed: %s, falling back to seed-based lookup", e)
         return _fallback_chunks(storage, seeds)
     ranked = [

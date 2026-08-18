@@ -1,0 +1,32 @@
+# 构建上下文瘦身：不要把本地环境、依赖缓存、运行时数据塞进镜像
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# 密钥绝不进镜像（运行时通过 env / env_file 注入）
+.env
+.env.*
+
+# 运行时数据（通过 volume 挂载）
+yusu_data/
+kb1/
+*.log
+
+# 前端依赖与产物（镜像内重新构建）
+yusu_webui/node_modules
+yusu_webui/dist
+yusu_webui/.env
+
+# 本地临时脚本与文档产物
+_*.py
+docs/
+*.md
+!README.md

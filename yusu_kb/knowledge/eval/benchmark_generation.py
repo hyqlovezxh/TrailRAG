@@ -398,13 +398,14 @@ async def iter_generated_benchmark_items(
     if progress_cb:
         await progress_cb(15, "准备生成样本")
 
-    if not llm_model_spec:
-        raise ValueError("llm_model_spec 不能为空")
-
     if llm_fn is not None:
-        llm = llm_fn(llm_model_spec)
-    else:
+        llm = llm_fn(llm_model_spec or "")
+    elif llm_model_spec:
         llm = create_chat_model(default_spec=llm_model_spec)
+    else:
+        # .env-only 部署（DB 无 provider 行）：回退 env 路径，与图谱抽取/模型层
+        # 其他入口保持一致，避免"llm_model_spec 不能为空"硬卡开源上手。
+        llm = create_chat_model()
     context_count = max(clamp_neighbors_count(neighbors_count), 1)
     max_attempts = max(count * 5, 50)
     worker_count = normalize_generation_concurrency_count(concurrency_count)

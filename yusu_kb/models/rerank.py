@@ -37,13 +37,19 @@ class BaseReranker(ABC):
         self._transport = kwargs.get("transport")
         self._session: httpx.AsyncClient | None = None
 
-    async def _ensure_session(self) -> httpx.AsyncClient:
-        if self._session is None or self._session.is_closed:
-            kwargs = {"headers": self.headers, "timeout": self.timeout}
-            if self._transport is not None:
-                kwargs["transport"] = self._transport
-            self._session = httpx.AsyncClient(**kwargs)
-        return self._session
+    def _new_client(self) -> httpx.AsyncClient:
+        """Create a per-request AsyncClient.
+
+        Never cache the client on the instance: a cached httpx client binds to
+        the event loop that created it, and reusing it from another loop raises
+        ``RuntimeError: Event loop is closed`` (Windows proactor in particular).
+        Rerankers are cached process-wide by ``get_cached_reranker``, so they
+        outlive individual loops and must not hold loop-bound state.
+        """
+        kwargs: dict[str, Any] = {"headers": self.headers, "timeout": self.timeout}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        return httpx.AsyncClient(**kwargs)
 
     @abstractmethod
     def _build_payload(self, query: str, documents: list[str], max_length: int) -> dict[str, Any]:
@@ -110,12 +116,12 @@ class BaseReranker(ABC):
             return []
 
         payload = self._build_payload(query, docs, max_length)
-        session = await self._ensure_session()
 
         try:
-            response = await session.post(self.url, json=payload)
-            response.raise_for_status()
-            result: dict[str, Any] = response.json()
+            async with self._new_client() as session:
+                response = await session.post(self.url, json=payload)
+                response.raise_for_status()
+                result: dict[str, Any] = response.json()
         except httpx.TimeoutException:
             logger.error(f"Reranking request timeout after {self.timeout:.1f}s")
             raise
@@ -147,9 +153,14 @@ class BaseReranker(ABC):
             await self.aclose()
 
     async def aclose(self) -> None:
+        """Compatibility no-op: clients are per-request and closed on exit.
+
+        Kept so callers (``test_connection``, ``close_cached_rerankers``) keep
+        working; it also drains any legacy instance-held client.
+        """
         if self._session is not None and not self._session.is_closed:
             await self._session.aclose()
-            self._session = None
+        self._session = None
 
 
 class OpenAIReranker(BaseReranker):
@@ -189,6 +200,23 @@ def _env_value(*names: str, default: str | None = None) -> str | None:
     return default
 
 
+def _normalize_endpoint(base_url: str, suffix: str) -> str:
+    """将 provider base URL 规范化为完整的 OpenAI 风格端点。
+
+    接受带或不带 ``/v1`` 后缀的 base，统一产出 ``<base>/v1/<suffix>``
+    （URL 已以该 suffix 结尾时原样保留）。``.env`` 可只填裸主机，代码仍命中
+    各厂商的 ``/v1`` 路由。
+    """
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return base
+    if base.endswith(suffix):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/{suffix}"
+    return f"{base}/v1/{suffix}"
+
+
 def _build_reranker_from_spec(default_spec: str) -> OpenAIReranker:
     """Build the reranker from a ``provider_id:model_id`` spec via ModelCache."""
     from yusu_kb.models.providers.cache import model_cache
@@ -201,7 +229,7 @@ def _build_reranker_from_spec(default_spec: str) -> OpenAIReranker:
         )
     if info.model_type != "rerank":
         raise ValueError(f"模型 '{default_spec}' 的类型是 {info.model_type}，不是 rerank")
-    return OpenAIReranker(model_name=info.model_id, api_key=info.api_key, base_url=info.base_url)
+    return OpenAIReranker(model_name=info.model_id, api_key=info.api_key, base_url=_normalize_endpoint(info.base_url, "rerank"))
 
 
 def create_reranker(*, default_spec: str | None = None) -> BaseReranker | None:
@@ -224,7 +252,7 @@ def create_reranker(*, default_spec: str | None = None) -> BaseReranker | None:
     protocol = _env_value("YUSU_RERANK_PROTOCOL", default="openai")
     if protocol == "dashscope":
         return DashscopeReranker(model_name=model, api_key=api_key, base_url=base_url)
-    return OpenAIReranker(model_name=model, api_key=api_key, base_url=base_url)
+    return OpenAIReranker(model_name=model, api_key=api_key, base_url=_normalize_endpoint(base_url, "rerank"))
 
 
 _reranker_cache: dict[str, BaseReranker] = {}
@@ -232,10 +260,14 @@ _reranker_cache_lock = asyncio.Lock()
 
 
 async def get_cached_reranker(model_id: str) -> BaseReranker:
-    """获取或创建按 model_id 缓存的 reranker 实例（复用 session，不关闭）。"""
+    """获取或创建按 model_id 缓存的 reranker 实例。
+
+    实例本身无事件循环绑定状态（HTTP 客户端按请求创建），因此可安全跨请求、
+    跨事件循环复用，无需再校验 session 存活。
+    """
     async with _reranker_cache_lock:
         cached = _reranker_cache.get(model_id)
-        if cached is not None and cached._session is not None and not cached._session.is_closed:
+        if cached is not None:
             return cached
         reranker = create_reranker()
         if reranker is None:

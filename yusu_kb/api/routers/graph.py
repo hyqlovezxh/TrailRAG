@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from yusu_kb.api.deps import ChatModelDep, ManagerDep, verify_api_key
 from yusu_kb.knowledge.graphs.graph_service import GRAPH_CONFIG_KEY, GraphService
 from yusu_kb.knowledge.implementations.local_kb import LocalKB
+from yusu_kb.models.chat import OpenAIChatAdapter
 from yusu_kb.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
 router = APIRouter(
@@ -45,6 +46,37 @@ def _require_kb(manager, kb_id: str) -> LocalKB:
     if kb_id not in kb.databases_meta:
         raise HTTPException(status_code=404, detail="知识库不存在")
     return kb
+
+
+def _resolve_extractor_options(
+    extractor_type: str,
+    options: dict[str, Any] | None,
+    chat_model,
+) -> dict[str, Any] | None:
+    """Fill ``model_spec`` from the active chat model when the caller omits it.
+
+    The LLM extractor never builds a model object from ``model_spec`` — the
+    actual call goes through the injected ``chat_model_fn``, and ``model_spec``
+    only serves as identity/LLM-cache key. Requiring it verbatim would block
+    the documented ``.env``-only setup, where no provider row exists in the DB
+    yet. Defaulting it to the chat model actually in use keeps the cache key
+    correct while letting env-only deployments build graphs.
+    """
+    if extractor_type != "llm":
+        return options
+    resolved = dict(options or {})
+    if str(resolved.get("model_spec") or "").strip():
+        return resolved
+    # 只对真实聊天适配器补全：测试注入的 mock（如 FakeChat）没有 env/DB 模型
+    # 身份，补全会绕过 service 层"LLM 图谱抽取器需要 model_spec"的 400 校验，
+    # 破坏配置契约；真实 .env-only 部署的 chat_model 一定是 OpenAIChatAdapter。
+    if not isinstance(chat_model, OpenAIChatAdapter):
+        return resolved
+    model_id = getattr(chat_model, "model", None) or getattr(chat_model, "model_name", None)
+    if not model_id:
+        return resolved
+    resolved["model_spec"] = f"env:{model_id}"
+    return resolved
 
 
 def _get_graph_service(kb: LocalKB, kb_id: str, chat_model) -> GraphService:
@@ -153,7 +185,9 @@ async def update_graph_config(
         result = await service.configure(
             kb_id,
             extractor_type=payload.extractor_type,
-            extractor_options=payload.extractor_options,
+            extractor_options=_resolve_extractor_options(
+                payload.extractor_type, payload.extractor_options, chat_model
+            ),
             created_by="api",
         )
     except ValueError as exc:
