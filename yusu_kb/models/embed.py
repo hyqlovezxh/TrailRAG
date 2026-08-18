@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from yusu_kb.utils.http import _normalize_endpoint
 from yusu_kb.utils.logger import logger
 
 EMBEDDING_RATE_LIMIT_MAX_RETRIES = 10
@@ -291,23 +292,6 @@ def _env_value(*names: str, default: str | None = None) -> str | None:
     return default
 
 
-def _normalize_endpoint(base_url: str, suffix: str) -> str:
-    """将 provider base URL 规范化为完整的 OpenAI 风格端点。
-
-    接受带或不带 ``/v1`` 后缀的 base，统一产出 ``<base>/v1/<suffix>``
-    （URL 已以该 suffix 结尾时原样保留）。``.env`` 可只填裸主机，代码仍命中
-    各厂商的 ``/v1`` 路由。
-    """
-    base = (base_url or "").rstrip("/")
-    if not base:
-        return base
-    if base.endswith(suffix):
-        return base
-    if base.endswith("/v1"):
-        return f"{base}/{suffix}"
-    return f"{base}/v1/{suffix}"
-
-
 def _sync_probe_dimension(model: BaseEmbeddingModel) -> int:
     """在可能已有事件循环运行的环境中同步探测 embedding 维度。
 
@@ -342,7 +326,7 @@ def _build_embedding_model_from_spec(default_spec: str) -> OtherEmbedding:
         raise ValueError(f"模型 '{default_spec}' 的类型是 {info.model_type}，不是 embedding")
     return OtherEmbedding(
         model=info.model_id,
-        base_url=info.base_url,
+        base_url=_normalize_endpoint(info.base_url, "embeddings"),
         api_key=info.api_key,
         dimension=info.dimension,
         batch_size=info.batch_size,

@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 
+from yusu_kb.utils.http import _normalize_endpoint
 from yusu_kb.utils.logger import logger
 
 
@@ -172,23 +173,6 @@ def _env_value(*names: str, default: str | None = None) -> str | None:
         if value:
             return value
     return default
-
-
-def _normalize_endpoint(base_url: str, suffix: str) -> str:
-    """将 provider base URL 规范化为完整的 OpenAI 风格端点。
-
-    接受带或不带 ``/v1`` 后缀的 base，统一产出 ``<base>/v1/<suffix>``
-    （URL 已以该 suffix 结尾时原样保留）。这样 ``.env`` 可只填裸主机
-    （如 ``https://api.siliconflow.cn``），代码仍命中各厂商的 ``/v1`` 路由。
-    """
-    base = (base_url or "").rstrip("/")
-    if not base:
-        return base
-    if base.endswith(suffix):
-        return base
-    if base.endswith("/v1"):
-        return f"{base}/{suffix}"
-    return f"{base}/v1/{suffix}"
 
 
 def _build_chat_model_from_spec(default_spec: str) -> OpenAIChatAdapter:
