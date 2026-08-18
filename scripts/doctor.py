@@ -91,7 +91,7 @@ def check_dependencies() -> None:
         "pymupdf": "PDF 解析",
         "docx2txt": "Word (.docx) 解析",
         "openpyxl": "Excel 解析",
-        "bs4": "HTML 解析（beautifulsoup4）",
+        "bs4": "HTML 解析（pip 包名 beautifulsoup4，导入模块 bs4）",
         "dotenv": ".env 加载（python-dotenv）",
     }
     for module, purpose in required.items():

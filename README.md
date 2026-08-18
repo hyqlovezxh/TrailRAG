@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-4ecdc4?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-ff6b6b?style=for-the-badge&logoColor=white&labelColor=1a1a2e)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-open%20source%20release-00d9ff?style=for-the-badge&logoColor=white&labelColor=1a1a2e)](./README.md)
-[![Benchmarks](https://img.shields.io/badge/📊%20benchmarks-included-4ecdc4?style=for-the-badge&logoColor=white&labelColor=1a1a2e)](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
+[![Benchmarks](https://img.shields.io/badge/📊%20benchmarks-included-4ecdc4?style=for-the-badge&logoColor=white&labelColor=1a1a2e)](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
 
 </div>
 
@@ -301,7 +301,7 @@ uv run ruff check yusu_kb
 
 语溯RAG 已与 LightRAG、Microsoft GraphRAG 在源码层逐行对比，覆盖检索准确度、入库索引速度、多跳推理、Token 效率、健壮性，以及面向低质量数据的"证据挖掘专项"。
 
-📊 **完整报告：** [RAG三套知识库权威对比分析报告（语溯RAG vs LightRAG vs GraphRAG）](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
+📊 **完整报告：** [RAG四套知识库权威对比分析报告（语溯RAG vs Semantica vs LightRAG vs GraphRAG）](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
 
 核心结论（目的加权·取证/低质量场景）：**语溯RAG 94.4% · LightRAG 80.2% · GraphRAG 67.4%**。语溯RAG 在检索准确度、入库速度、多跳推理与证据挖掘专项领先；在代码健壮性 / Token 效率 / 错误容忍度上，因通用框架工程更成熟，语溯RAG 诚实地评为略低。
 
@@ -318,7 +318,7 @@ uv run ruff check yusu_kb
 
 ## 文档
 
-- 📊 基准与对比报告（本仓库）：[RAG三套知识库权威对比分析报告](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
+- 📊 基准与对比报告（本仓库）：[RAG四套知识库权威对比分析报告](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
 - 📦 部署教程：[docs/部署教程.md](docs/部署教程.md)
 - 🚀 一键启动脚本：`scripts/start.ps1`（Windows）/ `scripts/start.sh`（Linux/macOS）/ `Dockerfile` + `docker-compose.yml`
 - 🔍 环境自检：[scripts/doctor.py](scripts/doctor.py)
@@ -397,7 +397,7 @@ Run `uv run --extra api python scripts/doctor.py` for a full environment + model
 
 TrailRAG has been compared, line-by-line at the source-code level, against LightRAG and Microsoft GraphRAG across retrieval accuracy, indexing speed, multi-hop reasoning, token efficiency, robustness, and an evidentiary mining track on low-quality data.
 
-📊 **Full report:** [RAG三套知识库权威对比分析报告（语溯RAG vs LightRAG vs GraphRAG）](./RAG三套知识库权威对比分析报告_语溯vsLightRAGvsGraphRAG.md)
+📊 **Full report:** [RAG四套知识库权威对比分析报告（语溯RAG vs Semantica vs LightRAG vs GraphRAG）](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
 
 Headline (purpose-weighted, evidentiary/low-quality scenario): **TrailRAG 94.4% · LightRAG 80.2% · GraphRAG 67.4%**. On the same benchmark set, end-to-end evaluation scored **TrailRAG 100% answer accuracy** (500/500, recall @5/@10 = 1.000); LightRAG and GraphRAG measured **88% and 92%** respectively.
 
