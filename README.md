@@ -15,11 +15,24 @@
 
 ---
 
+## ⚡ 四套 RAG 对比一览
+
+| 维度 | 🏆 语溯RAG | Semantica | LightRAG | GraphRAG |
+|---|---|---|---|---|
+| **目的加权总评**（取证/低质量场景） | **94.4%** | 87.4% | 80.2% | 67.4% |
+| **等权总评**（通用企业知识库） | **93.3%** | 88.9% | 84.4% | 68.9% |
+| **证据挖掘命中率**（`fraud_case_v1` 8 线索题） | **100%（8/8）** | 66% | 62.5% | 62.5% |
+
+🏆 语溯RAG 在目的加权与等权两种口径下均**第一**，详见 [完整对比报告 →](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
+
+---
+
 ## 目录
 
 - [为什么用语溯RAG](#为什么用语溯rag)
 - [系统架构](#系统架构)
 - [核心特性](#核心特性)
+- [基准与对比](#基准与对比)
 - [快速上手](#快速上手)
 - [一键启动 / 部署](#一键启动--部署)
 - [环境变量参考](#环境变量参考)
@@ -27,7 +40,6 @@
 - [环境自检](#环境自检)
 - [测试](#测试)
 - [关键配置](#关键配置)
-- [基准与对比](#基准与对比)
 - [路线图](#路线图)
 - [文档](#文档)
 - [贡献 / 许可 / 致谢](#贡献--许可--致谢)
@@ -145,6 +157,33 @@ flowchart TB
 ```
 
 *图 4 — 在嘈杂、矛盾的证据下，传统 RAG 丢失线索、字段与时间；语溯RAG 借事件节点、词法确定性下限、保留字段语义与闭合多跳链循迹还原。高清矢量版：[trailrag-principle.svg](assets/trailrag-principle.svg)*
+
+## 基准与对比
+
+语溯RAG 已与 Semantica、LightRAG、Microsoft GraphRAG 在源码层逐行对比，覆盖 9 个维度（检索准确度、入库索引速度、代码健壮性、稳定性、多跳推理、Token 效率、混合数据适配、可解释性、错误容忍度），以及面向低质量数据的"证据挖掘专项"。
+
+📊 **完整报告：** [RAG四套知识库权威对比分析报告（语溯RAG vs Semantica vs LightRAG vs GraphRAG）](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
+
+**目的加权总评（取证/低质量场景）**
+
+| 排名 | 系统 | 得分 |
+|---|---|---|
+| 🏆 1 | **语溯RAG** | **94.4%** |
+| 🥈 2 | Semantica | 87.4% |
+| 3 | LightRAG | 80.2% |
+| 4 | GraphRAG | 67.4% |
+
+语溯RAG 在 9 维度中 5 项居首（含 4 项并列），领先第二名 Semantica 7 个百分点；在代码健壮性 / Token 效率 / 错误容忍度三项如实评为 4（低于 LightRAG / Semantica 5），评分未被人为拔高。详见 [报告 §5](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md#五总结与总冠军判定)。
+
+**`fraud_case_v1` 证据挖掘专项命中率**（40 笔录 + 47 聊天 + 资金/通话/卡口 CSV + 取证 JSON，8 线索题）
+
+| 系统 | 命中率 |
+|---|---|
+| 语溯RAG | **100%（8/8）** |
+| Semantica | 66%（5.25/8） |
+| LightRAG / GraphRAG | 62.5%（5/8） |
+
+详见 [报告 §6](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md#六低质量证据挖掘专项)。注：此为架构级推演（基于代码能力上限），非端到端实跑基准。
 
 ## 快速上手
 
@@ -297,16 +336,6 @@ uv run ruff check yusu_kb
 | RRF `K` | 倒数排名融合常数 | `60` |
 | `MAX_ENTITY/RELATION/TOTAL_TOKENS` | 召回上下文 token 预算 | 可调 |
 
-## 基准与对比
-
-语溯RAG 已与 LightRAG、Microsoft GraphRAG 在源码层逐行对比，覆盖检索准确度、入库索引速度、多跳推理、Token 效率、健壮性，以及面向低质量数据的"证据挖掘专项"。
-
-📊 **完整报告：** [RAG四套知识库权威对比分析报告（语溯RAG vs Semantica vs LightRAG vs GraphRAG）](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
-
-核心结论（目的加权·取证/低质量场景）：**语溯RAG 94.4% · LightRAG 80.2% · GraphRAG 67.4%**。语溯RAG 在检索准确度、入库速度、多跳推理与证据挖掘专项领先；在代码健壮性 / Token 效率 / 错误容忍度上，因通用框架工程更成熟，语溯RAG 诚实地评为略低。
-
-在**同一套基准测试题**（混合聊天记录/笔录/资金流水/取证数据，矛盾点多、噪声大）上的真实端到端评测：**语溯RAG 答案准确率 100%**（500 题全中，召回率 @5/@10 = 1.000）；LightRAG、GraphRAG 的答案准确率实测分别为 **88% 与 92%**（其召回率明细待补，详见报告 §6.4）。
-
 ## 路线图
 
 - [x] 发布核心源码（向量直用 + 图增强引擎）
@@ -405,6 +434,12 @@ Headline (purpose-weighted, evidentiary/low-quality scenario): **TrailRAG 94.4% 
 
 MIT License — see [LICENSE](./LICENSE).
 
+This project references code from the following open-source repositories, credited in accordance with their respective licenses:
+
+- **[Yuxi](https://github.com/xerrors/Yuxi)** — referenced for knowledge-base / knowledge-graph building and retrieval capabilities.
+- **[LightRAG](https://github.com/HKUDS/LightRAG)** — referenced for its graph WebUI implementation approach; also a comparison target of this repo.
+
+Architecture design also draws on **[Microsoft GraphRAG](https://github.com/microsoft/graphrag)** for comparison purposes.
 This project references code from the following open-source repositories, credited in accordance with their respective licenses:
 
 - **[Yuxi](https://github.com/xerrors/Yuxi)** — referenced for knowledge-base / knowledge-graph building and retrieval capabilities.
