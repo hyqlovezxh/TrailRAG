@@ -74,6 +74,21 @@ async def init_db(engine: AsyncEngine) -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 幂等列补齐（事件驱动重构新增 doc_type）：存量库已建表时 create_all
+        # 不会加列，这里按 PRAGMA 检查后 ALTER ADD（additive，无数据重写）。
+        await conn.run_sync(_ensure_column, "ys_knowledge_chunks", "doc_type", "VARCHAR(32)")
+
+
+def _ensure_column(sync_conn, table: str, column: str, ddl_type: str) -> None:
+    """Ensure a column exists on an existing table (idempotent ALTER ADD)."""
+    import sqlalchemy as sa
+
+    existing = {
+        row["name"]
+        for row in sync_conn.execute(sa.text(f"PRAGMA table_info({table})")).mappings()
+    }
+    if column not in existing:
+        sync_conn.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
 
 
 async def dispose(engine: AsyncEngine) -> None:

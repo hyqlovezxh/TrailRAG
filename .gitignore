@@ -52,3 +52,21 @@ benchmark/
 /eval_runs/
 /report*.json
 *.pkl
+
+# ── 开源仓库卫生（避免提交无关/敏感/产物文件） ──
+# Agent 工作记忆与计划（含项目上下文，不应公开）
+.workbuddy/
+
+# 论文/报告构建产物（docx、中间 html 等）
+output/
+
+# 事件驱动改版的参考/草稿代码（非源码，含大量示例告警）
+事件驱动改版/
+
+# 端到端测试的本地工作目录与知识库数据
+.e2e_work/
+.e2e_work_offline/
+kb1/
+
+# 本地知识库存储（可能含真实案卷数据）
+yusu_data/

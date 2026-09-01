@@ -63,3 +63,9 @@ testpaths = ["yusu_kb/tests"]
 
 [tool.ruff]
 target-version = "py311"
+# 参考/草稿目录不参与开源代码门禁（含大量示例性告警）
+exclude = ["事件驱动改版"]
+
+[tool.ruff.lint.per-file-ignores]
+# 事件时间轴测试构造的是与抽取实现同语义的 naive datetime（LLM 输出无时区）
+"yusu_kb/tests/test_event_modules.py" = ["DTZ001", "DTZ007"]

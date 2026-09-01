@@ -1,8 +1,10 @@
 """Chunk preset registry and processing-param resolution.
 
 Ported from YUSU ``yuxi.knowledge.chunking.ragflow_like.presets``.
-The ``case_document`` preset (police case files) is not ported, so the default
-preset for the demo is ``general``.
+The ``case_document`` preset (police case files) is ported and set as the
+default for the event-driven edition: it auto-detects transcript /
+chat_record / csv_table / spreadsheet and time-window-chunks chat records
+with 【时间段 X ~ Y】 anchors that feed the event extractor.
 """
 
 from __future__ import annotations
@@ -12,9 +14,9 @@ from typing import Any
 
 from yusu_kb.utils.logger import logger
 
-# The demo edition defaults to "general": it is the base preset that
-# "case_document" used to extend, and needs no extra dependencies.
-DEFAULT_CHUNK_PRESET_ID = "general"
+# 事件驱动版默认预设：case_document 自动检测案件文档类型并分发
+# （笔录问答切分 / 聊天 30 分钟时间窗 / CSV/表格），为事件抽取提供时间锚。
+DEFAULT_CHUNK_PRESET_ID = "case_document"
 
 CHUNK_PRESETS: dict[str, dict[str, str]] = {
     "general": {
@@ -40,6 +42,11 @@ CHUNK_PRESETS: dict[str, dict[str, str]] = {
     "separator": {
         "label": "Separator",
         "description": "严格分隔：命中分隔符即切分，仅超长片段内部继续按长度切分。",
+    },
+    "case_document": {
+        "label": "Case Document",
+        "description": "案件文档分块：自动识别笔录/聊天/CSV/表格并分发专用分块（笔录问答切分、"
+        "聊天 30 分钟时间窗 + 时间段锚定），事件驱动路径推荐。",
     },
 }
 

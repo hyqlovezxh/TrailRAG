@@ -11,14 +11,19 @@ Ported from YUSU ``yuxi.knowledge.implementations.milvus`` (demo edition):
 Retrieval flow mirrors the Milvus implementation:
   vector / keyword / hybrid channels -> optional lexical channel (S1-A2
   deterministic exact-identifier recall) -> optional graph fusion -> source
-  hydration -> optional rerank -> ``final_top_k`` truncation.
+  hydration -> optional rerank -> ``final_top_k`` truncation. When the graph
+  is configured but not fully built, the graph channel first degrades to the
+  implicit-graph fallback: vector hits become seeds of a query-time implicit
+  graph and PPR runs multi-hop over it (``graphs/implicit_graph.py``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Any
 
@@ -27,6 +32,13 @@ from yusu_kb.knowledge.chunking.dispatcher import chunk_markdown
 from yusu_kb.knowledge.chunking.nlp import count_tokens
 from yusu_kb.knowledge.factory import KnowledgeBaseFactory
 from yusu_kb.knowledge.graphs.graph_service import GraphService
+from yusu_kb.knowledge.graphs.implicit_graph import (
+    ImplicitGraphConfig,
+    retrieve_implicit_chunks,
+)
+from yusu_kb.knowledge.graphs.implicit_graph import (
+    invalidate as invalidate_implicit_graph_cache,
+)
 from yusu_kb.knowledge.graphs.keyword_extractor import KeywordExtractor
 from yusu_kb.knowledge.graphs.ppr import rank_chunks_by_ppr
 from yusu_kb.knowledge.graphs.round_robin_merger import merge_seed_lists_round_robin
@@ -48,6 +60,11 @@ LOCAL_CHUNK_EMBED_BATCH_SIZE = 200
 # Retrieval candidates fetched when a file filter is active, since filtering
 # is applied post-hoc (nano-vectordb has no query-time filter expression).
 LOCAL_FILTERED_RECALL_MULTIPLIER = 3
+
+# Okapi BM25 constants for the keyword channel (standard defaults): k1 bounds
+# the TF saturation, b scales the document-length normalisation.
+_BM25_K1 = 1.5
+_BM25_B = 0.75
 
 # Deferred embedding singleton for LocalKB instances created without an
 # explicit ``embedding_func`` (API layer and tests inject their own via
@@ -243,6 +260,28 @@ class LocalRetrievalConfig:
             "description": "通过 Query 召回的三元组数量",
         },
     )
+    graph_event_top_k: int = field(
+        default=15,
+        metadata={
+            "label": "图事件召回数量",
+            "type": "number",
+            "min": 1,
+            "max": 100,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "通过 Query 召回的事件数量（事件驱动路径种子通道）",
+        },
+    )
+    graph_event_min_weight: float = field(
+        default=0.15,
+        metadata={
+            "label": "事件种子最低价值权重",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "G4：value_weight 低于此值的事件（chitchat/none）不作检索种子",
+        },
+    )
     graph_top_k: int = field(
         default=10,
         metadata={
@@ -298,6 +337,150 @@ class LocalRetrievalConfig:
             "max": 5,
             "depend_on": ("use_graph_retrieval", True),
             "description": "PPR 子图扩展的跳数（1-5）",
+        },
+    )
+    implicit_graph_enabled: bool = field(
+        default=True,
+        metadata={
+            "label": "启用隐式图回退",
+            "type": "boolean",
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "图谱已配置但未建完时，以向量命中为种子检索时动态构建隐式图并 PPR 多跳检索",
+        },
+    )
+    implicit_graph_coverage_threshold: float = field(
+        default=0.999,
+        metadata={
+            "label": "隐式图覆盖率阈值",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.05,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "图谱索引覆盖率低于此值时启用隐式图回退",
+        },
+    )
+    implicit_knn_k: int = field(
+        default=12,
+        metadata={
+            "label": "隐式图 KNN 邻居数",
+            "type": "number",
+            "min": 1,
+            "max": 50,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "mutual-KNN 建边时的邻居数量",
+        },
+    )
+    implicit_sim_threshold: float = field(
+        default=0.55,
+        metadata={
+            "label": "隐式边相似度阈值",
+            "type": "number",
+            "min": 0.0,
+            "max": 0.99,
+            "step": 0.01,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "SIM 边的余弦相似度下限，低于此值不建边",
+        },
+    )
+    implicit_damping: float = field(
+        default=0.80,
+        metadata={
+            "label": "隐式图 PPR 阻尼",
+            "type": "number",
+            "min": 0.1,
+            "max": 0.99,
+            "step": 0.01,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "隐式图 PPR 阻尼系数（低于实体图的 0.85，控制扩散半径）",
+        },
+    )
+    implicit_query_mix: float = field(
+        default=0.6,
+        metadata={
+            "label": "隐式图 Query 直查占比",
+            "type": "number",
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.05,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "personalization 中 query 直查信号占比，剩余权重归种子分块",
+        },
+    )
+    implicit_top_k: int = field(
+        default=20,
+        metadata={
+            "label": "隐式图召回分块数",
+            "type": "number",
+            "min": 1,
+            "max": 200,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "PPR 后从隐式图路径召回的分块数量",
+        },
+    )
+    implicit_weight: float = field(
+        default=0.4,
+        metadata={
+            "label": "隐式图融合权重",
+            "type": "number",
+            "min": 0.0,
+            "max": 2.0,
+            "step": 0.1,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "排名融合时隐式图结果的权重（回退通道应低于图检索的 0.5）",
+        },
+    )
+    implicit_max_corpus_nodes: int = field(
+        default=3000,
+        metadata={
+            "label": "隐式图全量建图上限",
+            "type": "number",
+            "min": 100,
+            "max": 50000,
+            "step": 100,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "全量 mutual-KNN 建图的最大分块数，超过则走锚点池增量构图",
+        },
+    )
+    implicit_timeout_ms: int = field(
+        default=400,
+        metadata={
+            "label": "隐式图超时（毫秒）",
+            "type": "number",
+            "min": 50,
+            "max": 5000,
+            "step": 50,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "隐式图构建与 PPR 的总超时，超时即降级为纯向量结果",
+        },
+    )
+    implicit_adjacent_enabled: bool = field(
+        default=True,
+        metadata={
+            "label": "隐式图相邻边",
+            "type": "boolean",
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "是否构建同文档相邻分块的 ADJACENT 边",
+        },
+    )
+    implicit_lexical_enabled: bool = field(
+        default=True,
+        metadata={
+            "label": "隐式图词法边",
+            "type": "boolean",
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "是否构建词法共现与精确标识符边（LEXICAL/EXACT_ID）",
+        },
+    )
+    implicit_query_pool_size: int = field(
+        default=64,
+        metadata={
+            "label": "隐式图 Query 池大小",
+            "type": "number",
+            "min": 1,
+            "max": 256,
+            "depend_on": ("use_graph_retrieval", True),
+            "description": "query softmax 信号最多覆盖的 top-M 分块数",
         },
     )
     graph_ppr_directed: bool = field(
@@ -991,25 +1174,64 @@ class LocalKB(KnowledgeBase):
         return None
 
     def _rank_keyword_chunks(self, records: list[Any], terms: list[str]) -> list[dict]:
-        """按词项命中数降序（并列时按 chunk_index 升序）为关键词命中排序。"""
-        chunks = []
-        lowered_terms = [term.lower() for term in terms]
-        for rec in records:
-            content_lower = (rec.content or "").lower()
-            match_count = sum(1 for term in lowered_terms if term in content_lower)
-            if match_count == 0:
+        """Okapi BM25 排序（局部 IDF 近似，候选集即评分范围）。
+
+        ``search_chunks_by_terms`` 返回的每条候选至少命中一个词项（df >= 1），
+        语料级统计不可得时以候选集近似：idf(t) = ln((N - df + 0.5)/(df + 0.5) + 1)
+        （Lucene 非负变体，恒为正）。TF 饱和（k1=1.5）与长度归一化（b=0.75）
+        遵循 Okapi 标准；总分按峰值归一化到 [0,1]，供下游 RRF/融合使用稳定尺度。
+        """
+        if not records:
+            return []
+        lowered_terms = [term.lower() for term in terms if term]
+        if not lowered_terms:
+            return []
+
+        contents_lower = [(rec.content or "").lower() for rec in records]
+        total = len(contents_lower)
+        avgdl = sum(len(content) for content in contents_lower) / total
+
+        # 局部 IDF：只在候选集上计算一次（词项数有限，O(terms × N) 逐字统计）
+        term_stats: list[tuple[str, float]] = []
+        for term in lowered_terms:
+            df = sum(1 for content in contents_lower if term in content)
+            if df == 0:
                 continue
-            score = float(match_count) / max(len(terms), 1)
+            term_stats.append((term, math.log((total - df + 0.5) / (df + 0.5) + 1.0)))
+        if not term_stats:
+            return []
+
+        scored: list[tuple[float, int, dict]] = []
+        for row, rec in enumerate(records):
+            content_lower = contents_lower[row]
+            doc_len_ratio = len(content_lower) / avgdl if avgdl > 0 else 0.0
+            length_norm = _BM25_K1 * (1.0 - _BM25_B + _BM25_B * doc_len_ratio)
+            score = 0.0
+            match_count = 0
+            for term, idf in term_stats:
+                tf = content_lower.count(term)
+                if tf <= 0:
+                    continue
+                match_count += 1
+                score += idf * (tf * (_BM25_K1 + 1.0)) / (tf + length_norm)
+            if score <= 0.0:
+                continue
             chunk = self._build_chunk_from_record(rec, score, score_field="bm25_score")
             chunk["match_count"] = match_count
+            scored.append((score, row, chunk))
+        if not scored:
+            return []
+
+        # 峰值归一化到 [0,1]；并列分数按 chunk_index 升序（与原实现一致）
+        peak = max(score for score, _, _ in scored)
+        chunks = []
+        for score, _row, chunk in sorted(
+            scored,
+            key=lambda item: (-item[0], int(item[2]["metadata"].get("chunk_index") or 0)),
+        ):
+            chunk["bm25_score"] = score / peak
+            chunk["score"] = chunk["bm25_score"]
             chunks.append(chunk)
-        chunks.sort(
-            key=lambda item: (
-                float(item.get("bm25_score") or 0.0),
-                -int(item["metadata"].get("chunk_index") or 0),
-            ),
-            reverse=True,
-        )
         return chunks
 
     async def _retrieve_keyword_chunks(
@@ -1019,7 +1241,7 @@ class LocalKB(KnowledgeBase):
         allowed_file_ids: set[str] | None,
         merged_kwargs: dict[str, Any],
     ) -> list[dict]:
-        """关键词全文检索通道（SQLite LIKE + 词项命中计数排序）。
+        """关键词全文检索通道（SQLite LIKE 候选召回 + Okapi BM25 排序）。
 
         使用查询分析产出的 exact tokens 与分词词项作为检索词项；无词项时
         回退 phrase 整句切分。
@@ -1094,7 +1316,21 @@ class LocalKB(KnowledgeBase):
         → PPR 扩散排序 chunk → 文件过滤 → 组装统一 chunk 结构。任何失败返回
         ([], error)，调用方记录日志并降级纯向量检索，不阻断主流程。
         """
-        del base_chunks
+        # 隐式图回退：图谱已配置但未建完（coverage < 阈值）时，向量命中不再被
+        # 丢弃，而是作为种子在检索时动态构建隐式图并 PPR 多跳检索。
+        if self._is_implicit_graph_enabled(kb_id, query_params):
+            try:
+                coverage = await self._graph_coverage(kb_id)
+                coverage_threshold = float(
+                    query_params.get("implicit_graph_coverage_threshold", 0.999) or 0.999
+                )
+                if coverage < coverage_threshold:
+                    return await self._retrieve_implicit_graph_chunks(
+                        query_text, kb_id, base_chunks, query_params, coverage
+                    )
+            except Exception as exc:  # noqa: BLE001 - 回退通道任何异常都必须降级而非中断主检索
+                logger.warning(f"Implicit graph fallback failed for kb={kb_id}, degrading: {exc}")
+                return [], str(exc)
         if not self._is_graph_retrieval_enabled(kb_id, query_params):
             return [], None
         try:
@@ -1111,6 +1347,8 @@ class LocalKB(KnowledgeBase):
 
             graph_entity_top_k = max(int(query_params.get("graph_entity_top_k", 15) or 15), 1)
             graph_triple_top_k = max(int(query_params.get("graph_triple_top_k", 15) or 15), 1)
+            graph_event_top_k = max(int(query_params.get("graph_event_top_k", 15) or 15), 1)
+            graph_event_min_weight = float(query_params.get("graph_event_min_weight", 0.15) or 0.15)
             graph_top_k = max(int(query_params.get("graph_top_k", 10) or 10), 1)
             ppr_damping = float(query_params.get("ppr_damping", 0.85) or 0.85)
             graph_ppr_directed = bool(query_params.get("graph_ppr_directed", False))
@@ -1139,11 +1377,13 @@ class LocalKB(KnowledgeBase):
             ll_query = query_text if fallback_mode else " ".join(ll_keywords or hl_keywords)
             hl_query = " ".join(hl_keywords) if hl_keywords else query_text
 
-            # 2) 双路 seed：entity store 用 LL 关键词（fallback 模式权重 *0.3
+            # 2) 三路 seed：entity store 用 LL 关键词（fallback 模式权重 *0.3
             #    弱化直查信号）；triple store 用 HL 关键词，命中三元组的
-            #    source/target 两端各记 *0.6 权重（无 LL 时以 hit.score 为底）。
+            #    source/target 两端各记 *0.6 权重（无 LL 时以 hit.score 为底）；
+            #    event store 用 HL 关键词，命中事件按 sim*value_weight 记（G4）。
             entity_store = await svc.get_vector_store(kb_id, "entity")
             triple_store = await svc.get_vector_store(kb_id, "triple")
+            event_store = await svc.get_vector_store(kb_id, "event")
             entity_weight_scale = 0.3 if fallback_mode else 1.0
             entity_seeds: list[tuple[str, float]] = [
                 (hit["id"], float(hit.get("score") or 0.0) * entity_weight_scale)
@@ -1159,9 +1399,17 @@ class LocalKB(KnowledgeBase):
                     triple_seeds.append((str(source_id), score))
                 if target_id:
                     triple_seeds.append((str(target_id), score))
+            event_seeds: list[tuple[str, float]] = []
+            for hit in await event_store.search(hl_query, graph_event_top_k):
+                event_value_weight = float(hit.get("value_weight") or 1.0)
+                if event_value_weight < graph_event_min_weight:
+                    continue  # G4：低价值事件（chitchat/none）不作种子
+                event_seeds.append(
+                    (str(hit["id"]), float(hit.get("score") or 0.0) * event_value_weight)
+                )
 
             # 3) round-robin 合并 → 归一化，剔除占总权重不足 1% 的弱 seed
-            merged = merge_seed_lists_round_robin(entity_seeds, triple_seeds)
+            merged = merge_seed_lists_round_robin(entity_seeds, triple_seeds, event_seeds)
             total_weight = sum(merged.values())
             if total_weight <= 0.0:
                 logger.debug(f"Graph retrieval for kb={kb_id} skipped: no entity seeds")
@@ -1179,15 +1427,27 @@ class LocalKB(KnowledgeBase):
             allowed_file_ids = await self._resolve_file_filter(kb_id, query_params)
             ppr_top_k = graph_top_k * 3 if allowed_file_ids is not None else graph_top_k
 
-            # 5) PPR 扩散排序（内部含 2hop/1hop 降级与 max 归一化）
+            # 5) PPR 扩散排序（内部含 2hop/1hop 降级与 max 归一化）。
+            #    事件种子按 event 节点类型分拣（entity seed 与 event seed 分开传）。
+            entity_seed_weights = {
+                entity_id: weight
+                for entity_id, weight in seed_weights.items()
+                if storage.get_event_node(entity_id) is None
+            }
+            event_seed_weights = {
+                event_id: weight
+                for event_id, weight in seed_weights.items()
+                if storage.get_event_node(event_id) is not None
+            }
             ranked = rank_chunks_by_ppr(
                 storage,
-                seed_weights,
+                entity_seed_weights,
                 top_k=ppr_top_k,
                 max_nodes=graph_max_nodes,
                 damping=ppr_damping,
                 directed=graph_ppr_directed,
                 chunk_count_weight=chunk_count_weight,
+                event_seed_weights=event_seed_weights,
             )
 
             # 6) 组装统一 chunk 结构（详情从 repo 取，过滤缺失/文件不匹配项）
@@ -1238,6 +1498,109 @@ class LocalKB(KnowledgeBase):
         extractor_options = graph_build_config.get("extractor_options") or {}
         model_spec = extractor_options.get("model_spec")
         return bool(model_spec)
+
+    def _is_implicit_graph_enabled(self, kb_id: str, query_params: dict[str, Any]) -> bool:
+        """判断是否启用隐式图回退路径。
+
+        三重门禁：灰度总开关 → 图检索总开关 → model_spec 护栏（从未配置过
+        图谱抽取的 KB 必须保持纯向量/关键词行为，``test_no_config_degrades_to_vector_only``
+        契约依赖此语义）。覆盖率判断在调用方完成（需要异步 DB 计数）。
+        """
+        if not bool(query_params.get("implicit_graph_enabled", False)):
+            return False
+        if not bool(query_params.get("use_graph_retrieval", True)):
+            return False
+        return self._is_graph_retrieval_enabled(kb_id, query_params)
+
+    async def _graph_coverage(self, kb_id: str) -> float:
+        """图谱索引覆盖率 = 已索引分块 / 总分块（单次 repository 计数）。"""
+        chunk_repo = KnowledgeChunkRepository()
+        total = await chunk_repo.count_by_kb_id(kb_id)
+        if total <= 0:
+            return 1.0  # 空库无回退意义，走正常图通道（同样返回空）
+        indexed = await chunk_repo.count_graph_indexed_by_kb_id(kb_id)
+        return indexed / total
+
+    async def _retrieve_implicit_graph_chunks(
+        self,
+        query_text: str,
+        kb_id: str,
+        base_chunks: list[dict],
+        query_params: dict[str, Any],
+        coverage: float,
+    ) -> tuple[list[dict], str | None]:
+        """隐式图回退检索（图谱已配置但未建完）。
+
+        向量命中保留 cosine 相似度作为种子权重；查询向量仅在回退真正触发时
+        按需计算，开关关闭时热路径零开销。hybrid 模式（coverage > 0）追加
+        真实实体图的 chunk 共现证据边（共享 MENTIONS 实体，按
+        ``hybrid_real_weight`` 缩放）。``retrieve_implicit_chunks`` 永不抛出：
+        任何失败降级为 ``([], error)``。
+        """
+        seed_weights: dict[str, float] = {}
+        for chunk in base_chunks:
+            metadata = chunk.get("metadata") or {}
+            chunk_id = metadata.get("chunk_id")
+            score = float(chunk.get("score") or 0.0)
+            if chunk_id and score > 0.0:
+                key = str(chunk_id)
+                seed_weights[key] = max(seed_weights.get(key, 0.0), score)
+        if not seed_weights:
+            return [], None
+        seed_total = sum(seed_weights.values())
+        seed_weights = {chunk_id: weight / seed_total for chunk_id, weight in seed_weights.items()}
+
+        try:
+            storage = await self._get_vector_storage(kb_id)
+            snapshot = storage.snapshot() if storage is not None else None
+        except Exception as exc:  # noqa: BLE001 - 快照失败降级，不阻断主检索
+            return [], f"implicit graph: snapshot unavailable: {exc}"
+
+        query_embedding: Sequence[float] | None = None
+        try:
+            vectors = await self._get_embedding_function()([query_text])
+            if vectors:
+                query_embedding = vectors[0]
+        except Exception as exc:  # noqa: BLE001 - 查询向量失败仅放弃 query 混合项，种子信号仍在
+            logger.debug(f"Implicit graph query embedding failed for kb={kb_id}: {exc}")
+
+        config_params: dict[str, Any] = dict(query_params)
+        if not bool(query_params.get("implicit_adjacent_enabled", True)):
+            config_params["implicit_weight_adjacent"] = 0.0
+        if not bool(query_params.get("implicit_lexical_enabled", True)):
+            config_params["implicit_weight_lexical"] = 0.0
+            config_params["implicit_weight_exact_id"] = 0.0
+        cfg = ImplicitGraphConfig.from_query_params(config_params)
+
+        real_edges: list[tuple[str, str, float]] = []
+        if coverage > 0.0:
+            try:
+                graph_storage = self._get_graph_service(kb_id).get_storage(kb_id)
+                real_edges = graph_storage.real_chunk_edges(
+                    list(seed_weights), weight_scale=cfg.hybrid_real_weight
+                )
+            except Exception as exc:  # noqa: BLE001 - 真实边只做 hybrid 增强，缺失不影响回退
+                logger.debug(f"Implicit graph real edges unavailable for kb={kb_id}: {exc}")
+
+        chunks, error, debug = await retrieve_implicit_chunks(
+            snapshot=snapshot,
+            seed_weights=seed_weights,
+            analysis=analyze_query(query_text),
+            cfg=cfg,
+            kb_id=kb_id,
+            query_embedding=query_embedding,
+            real_edges=real_edges,
+            coverage=coverage,
+            allowed_file_ids=await self._resolve_file_filter(kb_id, query_params),
+            top_k=max(int(query_params.get("implicit_top_k", 20) or 20), 1),
+        )
+        if debug is not None and debug.mode != "skipped":
+            logger.info(
+                f"Implicit graph retrieval for kb={kb_id}: mode={debug.mode}, tier={debug.tier}, "
+                f"nodes={debug.nodes}, edges={debug.edges}, hub_index={debug.hub_index:.4f}, "
+                f"build_ms={debug.build_ms:.1f}, ppr_ms={debug.ppr_ms:.1f}, chunks={len(chunks)}"
+            )
+        return chunks, error
 
     def _fuse_chunk_rankings(
         self,
@@ -1411,50 +1774,71 @@ class LocalKB(KnowledgeBase):
                     f"(vector={len(vector_chunks)}, keyword={len(keyword_chunks)})"
                 )
 
-            # S1-A2 确定性词法通道：精确值查询（编号/证件号/手机号）的确定性兜底召回。
-            # 只叠加不删减：通道未命中或失败时主检索结果完全不受影响。
-            if bool(merged_kwargs.get("lexical_channel_enabled", False)):
-                lexical_chunks, lexical_error = await self._retrieve_lexical_chunks(
-                    query_text, kb_id, allowed_file_ids, merged_kwargs
-                )
-                if lexical_error:
-                    logger.warning(f"Lexical channel degraded for kb={kb_id}: {lexical_error}")
-                elif lexical_chunks:
-                    exact_matched_ids = {
-                        c["metadata"]["chunk_id"]
-                        for c in lexical_chunks
-                        if c.get("exact_match") and c["metadata"].get("chunk_id")
-                    }
-                    rrf_k = float(merged_kwargs.get("graph_rrf_k", 60.0))
-                    pre_fuse_count = len(retrieved_chunks)
-                    retrieved_chunks = self._fuse_chunk_rankings(retrieved_chunks, lexical_chunks, 1.0, rrf_k)
-                    # 融合以先入池的 chunk 字典为底，需回写 exact_match 标记供 rerank 后分数下限使用
-                    for chunk in retrieved_chunks:
-                        if chunk.get("metadata", {}).get("chunk_id") in exact_matched_ids:
-                            chunk["exact_match"] = True
-                    logger.info(
-                        f"Lexical channel fused: kb={kb_id}, pre_fuse={pre_fuse_count}, "
-                        f"lexical={len(lexical_chunks)}, exact_matched={len(exact_matched_ids)}, "
-                        f"fused={len(retrieved_chunks)}"
-                    )
+            # 词法通道与图通道相互独立：基础通道产出后二者可并行检索，
+            # 仅融合次序保持「先词法后图」（见下方顺序 fuse）。图通道的隐式回退
+            # 以基础通道结果为 PPR 种子，故传入并行前快照 base_for_graph
+            # （即词法增强前的结果，避免精确标识符命中污染隐式种子）。
+            base_for_graph = list(retrieved_chunks)
 
-            if use_graph_retrieval:
-                # 解包 (chunks, error)，记录图检索错误指标便于运维监控
-                graph_chunks, graph_error = await self._retrieve_graph_chunks(
-                    query_text, kb_id, retrieved_chunks, merged_kwargs
+            async def _disabled_channel() -> tuple[list[dict], str | None]:
+                return [], None
+
+            lexical_enabled = bool(merged_kwargs.get("lexical_channel_enabled", False))
+            lexical_coro = (
+                self._retrieve_lexical_chunks(query_text, kb_id, allowed_file_ids, merged_kwargs)
+                if lexical_enabled
+                else _disabled_channel()
+            )
+            graph_coro = (
+                self._retrieve_graph_chunks(query_text, kb_id, base_for_graph, merged_kwargs)
+                if use_graph_retrieval
+                else _disabled_channel()
+            )
+            (lexical_result, graph_result) = await asyncio.gather(lexical_coro, graph_coro)
+            lexical_chunks, lexical_error = lexical_result
+            graph_chunks, graph_error = graph_result
+
+            # --- 词法通道融合（先于图通道）---
+            if lexical_error:
+                logger.warning(f"Lexical channel degraded for kb={kb_id}: {lexical_error}")
+            elif lexical_chunks:
+                exact_matched_ids = {
+                    c["metadata"]["chunk_id"]
+                    for c in lexical_chunks
+                    if c.get("exact_match") and c["metadata"].get("chunk_id")
+                }
+                rrf_k = float(merged_kwargs.get("graph_rrf_k", 60.0))
+                pre_fuse_count = len(retrieved_chunks)
+                retrieved_chunks = self._fuse_chunk_rankings(retrieved_chunks, lexical_chunks, 1.0, rrf_k)
+                # 融合以先入池的 chunk 字典为底，需回写 exact_match 标记供 rerank 后分数下限使用
+                for chunk in retrieved_chunks:
+                    if chunk.get("metadata", {}).get("chunk_id") in exact_matched_ids:
+                        chunk["exact_match"] = True
+                logger.info(
+                    f"Lexical channel fused: kb={kb_id}, pre_fuse={pre_fuse_count}, "
+                    f"lexical={len(lexical_chunks)}, exact_matched={len(exact_matched_ids)}, "
+                    f"fused={len(retrieved_chunks)}"
                 )
+
+            # --- 图通道融合（后于词法通道）---
+            if use_graph_retrieval:
                 if graph_error:
                     # 图检索失败时仅记录日志，不中断主流程（降级到纯向量检索）
                     logger.warning(f"Graph retrieval degraded for kb={kb_id}: {graph_error}")
                 if graph_chunks:
-                    graph_weight = float(merged_kwargs.get("graph_weight", 0.5))
+                    # 隐式回退 chunk 携带独立（更弱）的融合权重：回退通道
+                    # 不应比已建满的实体图主通道更强势（0.4 < 0.5）。
+                    if any("implicit_score" in chunk for chunk in graph_chunks):
+                        fusion_weight = float(merged_kwargs.get("implicit_weight", 0.4))
+                    else:
+                        fusion_weight = float(merged_kwargs.get("graph_weight", 0.5))
                     rrf_k = float(merged_kwargs.get("graph_rrf_k", 60.0))
                     pre_fuse_count = len(retrieved_chunks)
-                    retrieved_chunks = self._fuse_chunk_rankings(retrieved_chunks, graph_chunks, graph_weight, rrf_k)
+                    retrieved_chunks = self._fuse_chunk_rankings(retrieved_chunks, graph_chunks, fusion_weight, rrf_k)
                     logger.info(
                         f"Graph retrieval fused: kb={kb_id}, vector_chunks={pre_fuse_count}, "
                         f"graph_chunks={len(graph_chunks)}, fused_chunks={len(retrieved_chunks)}, "
-                        f"graph_weight={graph_weight}, rrf_k={rrf_k}"
+                        f"graph_weight={fusion_weight}, rrf_k={rrf_k}"
                     )
                 elif not graph_error:
                     logger.info(
@@ -1513,6 +1897,9 @@ class LocalKB(KnowledgeBase):
 
         await self._delete_file_graph_only(kb_id, file_id)
 
+        # 隐式图缓存按 chunk ids 派生键，删除后键自然变化；这里主动失效以回收内存
+        invalidate_implicit_graph_cache(kb_id)
+
         await chunk_repo.delete_by_file_id(file_id)
 
         storage = await self._get_vector_storage(kb_id)
@@ -1556,6 +1943,7 @@ class LocalKB(KnowledgeBase):
             await GraphService.evict(kb_id)
         except Exception as e:  # noqa: BLE001 - evict 失败不应阻断 KB 删除主流程
             logger.warning(f"Failed to evict graph service for kb {kb_id}: {e}")
+        invalidate_implicit_graph_cache(kb_id)
         return await super().delete_database(kb_id)
 
     async def get_file_basic_info(self, kb_id: str, file_id: str) -> dict:

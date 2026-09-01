@@ -66,14 +66,14 @@ def test_empty_graph_save_load_roundtrip(tmp_path):
     assert data_file.exists()
     raw = json.loads(data_file.read_text(encoding="utf-8"))
     assert raw["kb_id"] == "kb_test"
-    assert raw["version"] == 1
+    assert raw["version"] == 2
     assert raw["nodes"] == []
     assert raw["edges"] == []
 
     storage2 = NetworkXGraphStorage("kb_test", tmp_path)
     storage2.load()
     assert not storage2.is_built()
-    assert storage2.get_stats() == {"entities": 0, "relations": 0, "mentions": 0, "chunks": 0}
+    assert storage2.get_stats() == {"entities": 0, "relations": 0, "mentions": 0, "chunks": 0, "events": 0, "event_mentions": 0, "chunk_events": 0, "event_links": 0}
 
 
 def test_upsert_entity_merges_description_and_attributes(storage):
@@ -168,7 +168,7 @@ def test_add_chunk_and_mention_dedup(storage):
     _add_entity(storage, "e1", "Alpha")
     storage.add_mention(entity_id="e1", chunk_id="c1", file_id="f1")
     storage.add_mention(entity_id="e1", chunk_id="c1", file_id="f1")
-    assert storage.get_stats() == {"entities": 1, "relations": 0, "mentions": 1, "chunks": 1}
+    assert storage.get_stats() == {"entities": 1, "relations": 0, "mentions": 1, "chunks": 1, "events": 0, "event_mentions": 0, "chunk_events": 0, "event_links": 0}
 
 
 def test_upsert_relation_merges_file_ids_and_description(storage):
@@ -290,7 +290,7 @@ def test_get_labels_and_get_stats(storage):
     _add_entity(storage, "e3", "622200", label="银行账户")
     labels = storage.get_labels()
     assert {item["label"]: item["count"] for item in labels} == {"人物": 2, "银行账户": 1}
-    assert storage.get_stats() == {"entities": 3, "relations": 0, "mentions": 0, "chunks": 0}
+    assert storage.get_stats() == {"entities": 3, "relations": 0, "mentions": 0, "chunks": 0, "events": 0, "event_mentions": 0, "chunk_events": 0, "event_links": 0}
 
 
 def test_relations_between_and_node_reads(storage):
@@ -328,7 +328,7 @@ def test_delete_file_cascade_and_orphans(storage):
     _add_relation(storage, "e2", "e3", "related_to", ["f1", "f2"], triple_id="t2")
 
     assert storage.delete_file("f1") == ["e1"]
-    assert storage.get_stats() == {"entities": 3, "relations": 1, "mentions": 1, "chunks": 1}
+    assert storage.get_stats() == {"entities": 3, "relations": 1, "mentions": 1, "chunks": 1, "events": 0, "event_mentions": 0, "chunk_events": 0, "event_links": 0}
     remaining = storage.iter_relations()[0]
     assert (remaining["source_id"], remaining["target_id"], remaining["file_ids"]) == ("e2", "e3", ["f2"])
 
@@ -338,7 +338,7 @@ def test_delete_file_cascade_and_orphans(storage):
     # e1 stayed in the graph (orphans are reported, not purged), so the
     # final delete reports it alongside e2/e3
     assert sorted(storage.delete_file("f2")) == ["e1", "e2", "e3"]
-    assert storage.get_stats() == {"entities": 3, "relations": 0, "mentions": 0, "chunks": 0}
+    assert storage.get_stats() == {"entities": 3, "relations": 0, "mentions": 0, "chunks": 0, "events": 0, "event_mentions": 0, "chunk_events": 0, "event_links": 0}
 
 
 def test_update_descriptions(storage):
@@ -391,6 +391,44 @@ def test_load_tolerant_of_missing_and_corrupt(tmp_path):
     assert not storage.is_built()
 
 
+def test_load_accepts_v1_payload(tmp_path):
+    """v1 payload is a legal subset of v2; entity/chunk nodes must load unchanged."""
+    storage = NetworkXGraphStorage("kb_test", tmp_path)
+    data_file = tmp_path / "kb_test" / "graph_storage.json"
+    data_file.parent.mkdir(parents=True, exist_ok=True)
+    data_file.write_text(
+        json.dumps(
+            {
+                "kb_id": "kb_test",
+                "version": 1,
+                "nodes": [
+                    {"type": "entity", "entity_id": "e1", "normalized_name": "alpha",
+                     "label": "concept", "name": "Alpha", "attributes": [], "description": ""},
+                    {"type": "chunk", "chunk_id": "c1", "file_id": "f1", "chunk_index": 0,
+                     "content_preview": "preview"},
+                ],
+                "edges": [
+                    {"edge_type": "MENTIONS", "chunk_id": "c1", "entity_id": "e1", "file_id": "f1"},
+                    {"edge_type": "RELATION", "source_id": "e1", "target_id": "e1",
+                     "triple_id": "t1", "text": "关联", "type": "关联", "file_ids": ["f1"],
+                     "description": ""},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    storage.load()
+    assert storage.get_stats() == {"entities": 1, "relations": 1, "mentions": 1, "chunks": 1, "events": 0, "event_mentions": 0, "chunk_events": 0, "event_links": 0}
+    assert storage.get_entity_node("e1")["label"] == "concept"
+    # v1 graph must round-trip back as v2 without loss
+    storage.save()
+    raw = json.loads(data_file.read_text(encoding="utf-8"))
+    assert raw["version"] == 2
+    assert len(raw["nodes"]) == 2
+    assert len(raw["edges"]) == 2
+
+
 def test_load_restores_saved_state(tmp_path):
     storage = NetworkXGraphStorage("kb_test", tmp_path)
     _add_entity(storage, "e1", "Alpha")
@@ -430,7 +468,7 @@ def test_persisted_format_and_reload(tmp_path):
 
     raw = json.loads((tmp_path / "kb_test" / "graph_storage.json").read_text(encoding="utf-8"))
     assert raw["kb_id"] == "kb_test"
-    assert raw["version"] == 1
+    assert raw["version"] == 2
     assert len(raw["nodes"]) == 4
     assert len(raw["edges"]) == 3
 

@@ -212,6 +212,68 @@ async def test_requires_initialize():
         await store.query("x", top_k=1)
 
 
+async def test_snapshot_matches_query_cosine(store):
+    """Snapshot rows must reproduce the exact cosine scores that query() returns."""
+    await store.upsert(_documents())
+    await store.index_done_callback()
+
+    query = "苹果"
+    results = await store.query(query, top_k=3)
+    snap = store.snapshot()
+    assert snap is not None
+    assert len(snap.ids) == 3
+
+    row_of = {chunk_id: i for i, chunk_id in enumerate(snap.ids)}
+    query_vec = _fake_embed_one(query)
+    for hit in results:
+        row = snap.matrix[row_of[hit["id"]]]
+        # 行已 L2 归一化（nano-vectordb upsert 时 normalize），点积即余弦
+        assert float(np.dot(row, query_vec)) == pytest.approx(
+            float(hit["distance"]), abs=1e-5
+        )
+
+
+async def test_snapshot_is_row_aligned_with_metadata(store):
+    await store.upsert(_documents())
+    await store.index_done_callback()
+
+    snap = store.snapshot()
+    assert snap is not None
+    assert len(snap.ids) == len(snap.metas) == snap.matrix.shape[0]
+    # 按 id 对齐：每个 id 的 meta 必须仍属于它自己，且不含重载体/内部字段
+    aligned = dict(zip(snap.ids, snap.metas))
+    assert aligned["c0"]["content"] == "苹果是红色的水果"
+    assert aligned["c2"]["file_id"] == "f2"
+    assert "vector" not in aligned["c0"]
+    assert "__vector__" not in aligned["c0"]
+
+
+async def test_snapshot_is_none_before_flush(store):
+    await store.upsert(_documents())
+    # 未 flush 时分块对检索不可见，快照同样应不可用（与 query 语义一致）
+    assert store.snapshot() is None
+
+
+async def test_snapshot_replaced_not_mutated_on_new_flush(store):
+    """A handed-out snapshot must stay valid when the corpus is later extended."""
+    await store.upsert({"c0": {"content": "苹果是红色的水果", "file_id": "f1", "chunk_index": 0}})
+    await store.index_done_callback()
+    first = store.snapshot()
+    assert first is not None
+    frozen = np.array(first.matrix)  # 复制一份作为比对基准
+
+    await store.upsert(_documents())
+    await store.index_done_callback()
+    second = store.snapshot()
+    assert second is not None
+
+    # 新快照是全新对象，旧对象内容毫发无损 → 缓存是"替换"而非"原地改写"
+    assert second.matrix is not first.matrix
+    assert np.array_equal(first.matrix, frozen)
+    assert len(second.ids) == 3
+    assert len(first.ids) == 1
+
+
 async def test_concurrent_flush_serialized(tmp_path):
     embed = _FakeEmbed()
     store = VectorStore(

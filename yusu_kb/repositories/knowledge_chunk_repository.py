@@ -31,6 +31,7 @@ _ALLOWED_FIELDS = {
     "ent_ids",
     "tags",
     "extraction_result",
+    "doc_type",
 }
 
 

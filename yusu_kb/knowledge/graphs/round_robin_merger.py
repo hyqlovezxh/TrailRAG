@@ -18,12 +18,14 @@ from __future__ import annotations
 def merge_seed_lists_round_robin(
     local_seeds: list[tuple[str, float]],
     global_seeds: list[tuple[str, float]],
+    *additional_seed_lists: list[tuple[str, float]],
 ) -> dict[str, float]:
-    """双路检索 seed 交替合并。
+    """多路检索 seed 交替合并（2 路 + 附加路）。
 
     Args:
         local_seeds: LL 关键词→entity VDB 检索结果，按相似度降序排列，元素为 (entity_id, weight)
         global_seeds: HL 关键词→triple VDB 检索提取的 entity 列表，按相似度降序排列
+        *additional_seed_lists: 附加路（如事件驱动的 event VDB 检索结果）
 
     Returns:
         合并后的 entity_id → weight 字典（按交错顺序插入，同 entity_id 取 max weight）
@@ -32,15 +34,14 @@ def merge_seed_lists_round_robin(
         >>> merge_seed_lists_round_robin([("A", 0.9), ("B", 0.8)], [("B", 0.95), ("C", 0.7)])
         {'A': 0.9, 'B': 0.95, 'C': 0.7}
     """
+    seed_lists = [local_seeds, global_seeds, *additional_seed_lists]
     merged: dict[str, float] = {}
-    max_len = max(len(local_seeds), len(global_seeds))
+    max_len = max((len(seeds) for seeds in seed_lists), default=0)
     for i in range(max_len):
-        if i < len(local_seeds):
-            entity_id, weight = local_seeds[i]
-            _merge_seed(merged, entity_id, weight)
-        if i < len(global_seeds):
-            entity_id, weight = global_seeds[i]
-            _merge_seed(merged, entity_id, weight)
+        for seeds in seed_lists:
+            if i < len(seeds):
+                entity_id, weight = seeds[i]
+                _merge_seed(merged, entity_id, weight)
     return merged
 
 

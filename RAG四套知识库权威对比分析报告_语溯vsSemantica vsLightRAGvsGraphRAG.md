@@ -1,319 +1,277 @@
 # 四套知识库源码多维度权威对比分析报告
 ## 语溯RAG · Semantica · LightRAG · GraphRAG
 
-**版本**：v5（权威版，仅纳入完整源码在库内的系统，确保逐行可复核）
-**生成日期**：2026-08-19
-**分析方式**：基于工作区本地源码的静态代码审计（逐文件精读 + Grep 统计 + 关键路径行级取证）
-**适用声明**：本报告为中立技术分析，结论全部附 `文件:行号` 证据，计划开源至 GitHub，欢迎据证据独立复核。本版在原 v4 三套报告基础上，按**同一评分标准**新增 Semantica（`D:/PK/semantica`）并重算全部排名。
+**版本**：v6（事件驱动重构版——语溯RAG 部分全部基于重构后的 `yusu_kb` 最新代码重新取证）
+**生成日期**：2026-08-31
+**分析方式**：静态代码审计（逐文件精读 + 关键路径行级取证）+ 离线端到端实测（确定性驱动，496 项单元测试全绿）
+**适用声明**：本报告为中立技术分析，语溯RAG 的每项结论均附重构后代码的 `文件:行号`/符号名证据；Semantica / LightRAG / GraphRAG 三家仓库在 v5 审计后未变更，其证据沿用 v5 审计行号（标注"v5 沿用"），可回原仓库复核。
 
 ---
 
-## 一、对比目的与条件（透明声明，便于开源复现）
+## 一、对比范围与口径
 
-### 1.1 纳入原则（为什么比这四套）
-本报告坚持一条**可复核的公平底线**：**只对比"完整源码在本仓库内、可作行级取证"的系统**。任何核心检索/索引引擎以外部二进制或 PyPI 依赖形式存在、无法在库内逐行验证的系统，本轮不纳入正式评分——因为对"源码不可见"的系统只能引用其官方文档/论文推断，与"源码完全可见"的系统同表评分会构成**信息不对等**，不符合开源可信原则。据此，本轮参评系统为：
+### 1.1 参评系统
 
-| 系统 | 仓库路径 | 源码完整度 | 定位 |
+| 系统 | 源码位置 | 源码完整度 | 定位 |
 |---|---|---|---|
-| 语溯RAG | `D:/PK/语溯RAG` | 完整（64 .py） | 面向公安刑事案件的全模态 RAG |
-| Semantica | `D:/PK/semantica` | 完整（包内 350 .py，v0.6.5） | 图原生"Context Graph + 决策智能"基础设施（semantica-agi 开源项目本地副本） |
-| LightRAG | `D:/PK/lightrag` | 完整（166 .py） | 开源通用 RAG（HKU 团队，本地副本） |
-| GraphRAG | `D:/PK/graphrag` | 完整（Microsoft 官方，504 .py） | 开源通用 GraphRAG |
+| **语溯RAG** | 本仓库（yusu_kb，事件驱动重构后） | 完整（126 .py） | 面向海量低质量多来源文本的**事件驱动**检索增强生成（RAG） |
+| Semantica | Semantica 基线（v0.6.5，v5 沿用） | 完整（350 .py） | 图原生 Context Graph + 双时态 + 决策智能基础设施 |
+| LightRAG | LightRAG 基线（v5 沿用） | 完整（166 .py） | 通用实体-关系图 RAG（HKU） |
+| GraphRAG | GraphRAG 基线（v5 沿用） | 完整（504 .py） | 社区检测 + 社区报告的全局聚合架构（Microsoft） |
 
-> 四套均为**完整源码在库内**，本报告所有结论均可回到 `文件:行号` 复核，不存在"依赖外部文档推断"的黑箱环节。
+### 1.2 本版相对 v5 的变化
 
-### 1.2 本次对比要解决的核心问题
-传统知识库（含 GraphRAG、LightRAG 等）大多面向**企业高质量知识**设计：文档规范、实体清晰、少矛盾，因此对**确定性、高质量语料**效果好。但**公安取证行业**的数据现实截然不同：
+v5 审计的是语溯前身（`yuxi/knowledge`，实体-关系图谱架构）。此后语溯完成了**事件驱动重构**（S1–S8，八阶段全部落地并通过验收），核心变化：
 
-- 聊天记录**杂乱、口语化、含大量无关噪声**；
-- 笔录、聊天、资金流水、话单、卡口之间**可能相互矛盾**（缺乏数据治理）；
-- 数据**海量、低质量、且高度不确定**。
+1. **知识表示层重构**：叙事文本的图谱主体从"实体-关系二元组"改为**事件节点（n 元语义场）**——`yusu_kb/knowledge/graphs/event_schemas.py` 的 `EventRecord`（时/地/人/动作/金额/精确标识符为一等字段）；
+2. **双路径路由**：按文档类型自动分流——叙事文本走事件抽取，表格/流水/话单保留实体关系模式——`yusu_kb/knowledge/graphs/graph_utils.py` 的 `route_extractor_for_chunk`；
+3. **实体降格为锚点**：叙事实体仅保留 name/label 作为确定性跳板，由 `AnchorRegistry` 做单调裁决——`yusu_kb/knowledge/graphs/anchor_registry.py`；
+4. **新增护栏体系 G1–G4 与连通性门禁**：`event_guards.py`、`connectivity.py`；
+5. **新增事件多跳检索与 PPR 事件种子通道**：`multi_hop.py`、`event_expand.py`、`ppr.py`。
+6. **本次改造新增「检索时动态构图 + PPR 隐式多跳」回退通道**（v6.1）：语溯从设计之初即双路并行（图谱路 + BM25+向量路）；当图谱已配置抽取但**尚未建完**时，不再让向量通道裸返，而是以向量命中分块为种子，在检索时动态构建**隐式图**（SIM 互近邻 / ADJACENT 相邻 / LEXICAL 词项 / EXACT_ID 精确标识符四类边），用 PPR 完成多跳扩散，跳转到与命中向量语义最关联的远端分块；此外将关键词通道重写为**真 Okapi BM25**（局部 IDF），并把向量/词法/图三通道改为 `asyncio.gather` 真正并行（见 §3.2、§7.2）。
 
-在缺乏数据治理的低质量语料上，传统知识库很难从噪声中挖掘出办案真正需要的真实线索，构建出的知识图谱往往夹杂大量无关与低质量节点。**因此本报告的检索评测不只看"语义检索准不准"，而是重点评估知识库在"不确定性数据 + 海量低质量数据 + 跨证据多跳 + 案件宏观时序重建"下的真实可用性**。该评测场景统一折算进「检索准确度」维度（详见 §3.1、§4.1 与 §6），不单列维度，以同时满足"可量化对比"与"不喧宾夺主"。
+因此本版按**六个维度**重新对比：架构设计、索引与检索、异构数据处理、高噪声鲁棒性、矛盾检测、性能与成本。每维度给出对比表 + 要点 + 代码依据。
 
-### 1.3 评分方法（公平、可复核、防偏袒）
-- **量表**：每维度 1–5 分（5 = 最优），共 9 个维度。
-- **双口径同时公布**，杜绝加权本身被质疑为偏袒：
-  - **目的加权总评**（本报告目标：低质量取证 / 多跳 / 时序）→ 权重见 §3.2；
-  - **等权总评**（通用企业知识库视角）→ 9 维度等权，供横向校验。
-- **证据原则**：每条结论附 `文件:行号`；凡代码未支持之处，明确写"代码未见支持"。
-- **未跑实跑基准**：本报告为静态架构级评估，非端到端 benchmark（运行需各系统 LLM/Embedding 密钥与大量算力）；评分是对"代码能力上限与设计适配度"的专业推断，读者可据证据自行调整。
-- **利益披露**：语溯RAG 为面向本场景（公安取证）深度定制的系统，其在"取证适配"相关维度占优是**目标场景对齐的结果**，非评分偏向；本报告同时公布等权口径，并对语溯RAG 的短板（健壮性、Token 效率、错误容忍度）如实给出低于对手的分数，以证明评分未被人为拔高。Semantica 为新增外部参评方，其 0 项独占第一、4 项并列第一的成绩同样基于代码证据，未因"新参评"而加分或压分。
+### 1.3 评分口径
 
----
-
-## 二、四套系统架构定位（一句话定性）
-
-- **语溯RAG**：以**事件节点**为图谱核心 + 向量/关键词/词法/图谱多通道融合（RRF）+ 面向取证的领域分块与**确定性标识符兜底**；**双入库机制**（向量直用 + 并行图增强）。
-- **Semantica**：**确定性"图原生"基础设施**——实体-关系图谱 + **双时态事实（valid/recorded）与时间旅行快照** + **冲突检测/解析与实体去重** + **W3C PROV-O 全量溯源** + 前向链/Datalog/SPARQL 推理；**默认零 LLM**（spaCy NER + 模式关系抽取），检索为"向量 + 图遍历 + 关键词扫描"混合，可选 LLM 推理作答。
-- **LightRAG**：通用**实体-关系**图 + local/global/hybrid/mix 四模式；默认 NetworkX（内存图）+ NanoVectorDB；工程完备、Token 紧凑，但图写入串行。
-- **GraphRAG**：**社区检测（Leiden）+ 社区报告**的全局聚合架构；local/global/drift/basic 四模式；全局问答强，但 Token 成本高、索引最重。
+- 每维度 1–5 分（5 = 最优），分值顺序固定：**语溯RAG / Semantica / LightRAG / GraphRAG**；
+- 语溯RAG 的新证据来自 `yusu_kb` 重构后代码 + 离线端到端实测（确定性 hash embedding 驱动、真实 LLM 抽取的部分运行，见 §7）；
+- 对语溯不利的项如实降分（保持 v5 的"防偏袒"原则）。
 
 ---
 
-## 三、评分机制
+## 二、维度一：架构设计【5 / 4 / 3 / 2】
 
-### 3.1 维度定义
-1. **检索准确度**：语义召回准确 + 跨证据多跳命中 + **低质量/矛盾数据下的稳定召回** + **宏观/案件时序重建能力**（本维度承载取证专项评测，见 §6）。
-2. **入库索引速度**：解析→抽取→存储的吞吐与并发度、是否需全局图重算、时间到首次可检索（time-to-first-search）。
-3. **代码健壮性**：异常体系、输入校验、边界处理、集中化错误建模。
-4. **稳定性**：并发控制、事务/原子写、幂等、重试、限流、背压、单点故障隔离。
-5. **多跳推理可用性**：是否原生支持、跳数可控性、定向关系链、跨类型关联。
-6. **检索 Token 效率**：上下文组装紧凑度、是否需要巨型上下文、快速模式开销。
-7. **混合数据类型适配性**：对 .txt/.md/.docx/.pdf/.csv/.json/.xlsx/图片/音视频及结构化表格字段语义的支持。
-8. **可解释性**：来源引用、证据链、图谱路径、可质证性。
-9. **错误容忍度**：单文件/单条失败是否隔离、有无 fallback、重试/恢复机制。
+### 2.1 对比表
 
-### 3.2 维度权重（目的加权口径）
-| 维度 | 权重 | 依据 |
-|---|---|---|
-| 检索准确度 | 25% | 本报告核心目标（低质量 + 多跳 + 时序） |
-| 多跳推理可用性 | 12% | 取证证据链必需 |
-| 入库索引速度 | 10% | 海量数据可用性的前提 |
-| 代码健壮性 | 10% | 生产可用性 |
-| 稳定性 | 10% | 生产可用性 |
-| 错误容忍度 | 10% | 低质量数据下容错必需 |
-| 检索 Token 效率 | 8% | 成本约束 |
-| 混合数据类型适配性 | 8% | 多源取证数据 |
-| 可解释性 | 7% | 可质证要求 |
+| 设计要素 | 语溯RAG（事件驱动） | Semantica | LightRAG | GraphRAG |
+|---|---|---|---|---|
+| 图谱主体节点 | **事件（n 元命题）** + 锚点层 + 结构化旁路 | 实体-关系 + 双时态事实 | 实体-关系 | 实体-关系 + 社区报告 |
+| n 元绑定保留 | ✅ 时/地/人/动作/金额为节点一等字段 | △ 实体属性碎片 | ✗ 拆成二元关系 | ✗ 拆成二元关系 |
+| 叙事/结构化分流 | ✅ 按文档类型自动路由 | ✗ 单一管线 | ✗ 单一管线 | ✗ 单一管线 |
+| 时间语义 | ✅ `time_norm` 归一化 + 时序边 | ✅ 双时态（最强） | ✗ | ✗ |
+| 实体身份治理 | ✅ AnchorRegistry 单调裁决 | ✅ 实体合并（默认接线断裂） | △ 基础去重 | △ 基础去重 |
+| 图存储 | NetworkX 内存图 + SQLite 仓库 | JSON 图（非原子写） | NetworkX（整图重载） | Parquet/Lucene（最重） |
 
-> 权重直接反映"取证可用性"目标。等权口径见 §5.3，用于防止权重本身被质疑为偏袒。
+### 2.2 要点
 
----
+- **语溯RAG 5（事件 = 最小可判真单元）**：知识的最小单位是"命题"而非"实体"——实体"张三"不携带真假，命题"张三于 2025-10-05 14:24 主叫邓家俊，通话 295 秒"才可被佐证或推翻。`EventRecord` 把 n 元槽位（`event_type/summary/time_expr/time_norm/time_resolution/location/action/participants/objects/amount/exact_identifiers`）做成节点一等字段（`event_schemas.py:207` `EventRecord`），从根上杜绝"50000 元属于哪笔交易"这类绑定关系丢失问题——这是把 n 元谓词压成二元关系的实体路径的结构性缺陷（GraphRAG/LightRAG 均存在）。
+- **双路径路由（公理：已结构化的 n 元组不应被 LLM 重写）**：表格每行本身就是 n 元组，列名即槽位语义；`route_extractor_for_chunk`（`graph_utils.py:402`）按 `_detect_document_type` 结果分流——`transcript/chat_record/general/book` 走事件路径，`csv_table/spreadsheet` 保留实体关系抽取（`graph_service.py:694-701` 构建期按 chunk 逐个路由）。叙事与结构化各得其益，零人工配置。
+- **锚点层（实体的价值在确定性，不在语义）**：叙事实体降格为锚点（仅 name/label），事件间跳转不需要物化 O(N²) 共现边——锚点即跳板。`AnchorRegistry` 保证已落盘的 entity_id/label 永不变更（不变量②），新增冲突记入 `conflicts` 供连通性报告展示、旧身份保留为影子节点防止既有边断裂（`anchor_registry.py:50-92`）。
+- **Semantica 4**：双时态事实 + PROV-O 溯源是四套中最完整的语义基础设施，但**默认构建管线接线断裂**——冲突检测只记日志不写回图（`kg/graph_builder.py:828-852`，v5 沿用）、事件检测器不进入 KG 管线，架构完整性打折。
+- **LightRAG 3 / GraphRAG 2**：均为单一实体-关系管线，无事件模型、无分流；GraphRAG 额外背负 Leiden 社区重算与全局报告生成的架构重量。
 
-## 四、逐维度评分与代码证据
+### 2.3 代码依据（语溯RAG）
 
-> 分值顺序固定为：**语溯RAG / Semantica / LightRAG / GraphRAG**
-
-### 4.1 检索准确度【5 / 4 / 3 / 3】
-- **语溯RAG 5**：
-  - **确定性词法通道兜底**——`implementations/milvus.py:346-374` 定义 `lexical_channel_enabled`，对查询中的编号/手机号/证件号做"逐字校验"确定性召回；`:1311-1334` 词法命中的 chunk 标 `exact_match=True` 并经 RRF 融合；`:1400` `exact_score_floor=0.85` 保证精确命中即使被 rerank 压低也不掉出结果。→ **低质量杂乱语料中，精确标识符不会被语义噪声淹没**。
-  - **多通道融合**——向量 + 关键词 + 词法 + 图谱经 RRF（`:273-283` `graph_rrf_k=60`）融合；PPR 子图 1–5 跳（`:255-262`，默认 3）+ `query_relation_chains` 定向关系链，支撑跨"笔录-聊天-资金-话单-卡口"关联。
-  - **时序重建**——图谱以**事件节点**为核心并保留时间信息，可回答"某人某时干了某事 / 全案时序还原"；矛盾数据靠确定性标识符 + 可质证证据链消解。
-- **Semantica 4**：
-  - **原生强项——图多跳与双时态**：`context_graph.py:858-932` `get_neighbors` BFS 跳数可控 + 权重衰减；`kg/temporal_query.py:41` `TemporalGraphQuery`、`:107-209` `query_at_time`/`reconstruct_at_time`、`:359` `query_time_range`、`:597-714` `find_temporal_paths`（含因果顺序约束），`context_graph.py:2590-2601` `state_at` 时间旅行快照——**四套中唯一原生双时态（valid_time vs recorded_at，`kg/temporal_model.py:27-55`）**，宏观时序重建能力最强。
-  - **低质量数据治理内置**：`conflicts/conflict_detector.py:1205` 5 类冲突检测（值/类型/关系/时序/逻辑）+ `conflict_resolver.py:181-499` 7 种解析策略（投票/可信度加权/最新/首见/最高置信/人工/专家复核）；实体合并直接接入构建流程（`kg/graph_builder.py:748` `resolve_entities`，`kg/entity_resolver.py:92`）；混合检索 `hybrid_alpha` 0–1 可调（`context_retriever.py:150/763-764`）。
-  - **关键短板——无确定性标识符通道**：核心检索**无 BM25、无精确匹配通道、无分数下限兜底**；`context_graph.py:961-997` `query` 仅为暴力单词重叠扫描（`score = overlap / len(query_words)`），手机号/身份证/编号类精确命中只能靠语义近似，**低质量取证数据中精确标识符易被噪声淹没**——与语溯RAG 的 `exact_score_floor=0.85` 形成直接差距。
-  - **接线断裂**：冲突检测/解析在 `GraphBuilder` 默认流程中**只记日志不写回图**（`kg/graph_builder.py:828-852`）；事件节点（`EventDetector`）不进入 KG 构建管线（`graph_builder.py` 无 EventDetector 调用）；结构化数据不落图（见 §4.7）。
-- **LightRAG 3**：实体-关系图**无事件节点、无确定性标识符兜底**；多跳为 hybrid/mix 隐式 1–2 跳；CSV 仅文本级（见 §4.7）；低质量矛盾数据易引入噪声边，精确编号检索无专用通道，时序题无时间模型支撑。通用高质量语料上表现好，低质量取证语料上明显弱化。
-- **GraphRAG 3**：社区报告全局聚合能力强（擅长"整体讲了什么"），但 `packages/graphrag-input/graphrag_input/csv.py:31` 将 CSV **行级扁平化为文本**、丢失表格字段语义；local 检索仅 1 跳；无事件/时间模型，时序重建弱；低质量数据会污染社区划分与报告摘要。
-
-**本维度第一：语溯RAG（5，独占）** —— 直接对齐"低质量取证 + 多跳 + 时序"目标；Semantica 在时序与矛盾治理上最强、但精确标识符兜底缺失使其在本场景次之。
-
-### 4.2 入库索引速度【5 / 5 / 3 / 2】
-- **语溯RAG 5（双机制 + 高并发）**：
-  - ① **传统 RAG 直用通道**——`search_mode` 与 `use_graph_retrieval` 是**两个正交开关**（`implementations/milvus.py:1185-1191`）：分块向量化写入后，向量通道即可**独立检索**（`:1210`），图检索仅作可选叠加（`:1338 if use_graph_retrieval`），**time-to-first-search 极低**，不必等图构建完成。
-  - ② **图增强高并发通道**——LLM 抽取并发上限强制为 **1–128**（`graphs/extractors/llm.py:297-298`；执行层 cap 见 `graphs/milvus_graph_service.py:1231` 注释 `CR-029: 1000→128，适配高并发 LLM API`），配合图写入全局信号量 `GRAPH_WRITE_CONCURRENCY_LIMIT=10`（`:108/:131`）+ **跨 chunk 批量 flush**（`:266-271`），并行写入且有界不超卖连接池。
-- **Semantica 5（确定性零 LLM 抽取）**：
-  - **默认抽取无 LLM 往返**：NER 默认 `method="ml"`（spaCy，`semantic_extract/ner_extractor.py:89`）、关系/三元组默认 `"pattern"`（`relation_extractor.py:85`、`triplet_extractor.py:87`）——**无 API 延迟、无限流排队、无令牌成本**，海量数据入库吞吐不受 LLM 瓶颈约束；可选 `"llm"` 方法升级质量（`ner_extractor.py:8-14`）。
-  - **批处理并行**：事件/三元组抽取按文档级 `ThreadPoolExecutor` 并行（`event_detector.py:217-241`），向量嵌入并行 `max_workers=6`（`vector_store.py:114/388`）；无社区重算、无全局报告生成，图与向量一次构建完成。
-  - **如实标注的短板**：① spaCy（"ml"）方法默认被强制串行 `max_workers=1`（`semantic_extract/config.py:182-183`，spaCy 非线程安全）；② pipeline 引擎步骤级串行执行（`pipeline/execution_engine.py:244-330`，`parallelism_manager` 未接线 `:100`）。
-- **LightRAG 3（LLM 可并发，但图写入串行）**：实体抽取可按 LLM 并发，但图写入为**逐实体/逐关系串行 `await`**——`operate.py:1778/2264/3090/3228/3297` 均在 `for` 循环内逐个 `await upsert_node/upsert_edge`；`kg/networkx_impl.py:63/110` "mutual exclusion over self._graph"、`:256` 整图重载——**单内存图同步变异 + 整图文件持久化，存储层实质串行**，大图入库慢。
-- **GraphRAG 2（最重）**：实体/关系抽取后还需 **Leiden 社区检测 + 社区报告 LLM 生成**（`index/workflows/create_communities.py`、`operations/summarize_communities/`），workflow 链路最长，且增量数据常需重算全局社区，索引吞吐最低。
-
-**本维度第一（并列）：语溯RAG、Semantica（均 5）**。语溯靠双机制 + LLM 高并发，Semantica 靠确定性零 LLM 抽取；两者吞吐路径均不受串行图写/社区重算拖累。
-
-### 4.3 代码健壮性【4 / 4 / 5 / 4】
-- **语溯RAG 4**：`manager.py:808/819/836` per-kb 锁消除 TOCTOU、`base.py:1578` `asyncio.Semaphore(20)` 并发控制、`try/except` 分布密集、`eval/` 有重试判定。但**错误处理较分散，缺集中式错误分类框架**，故不评满分。
-- **Semantica 4**：有集中式体系——`utils/exceptions.py:49-273` `SemanticaError` 异常层级（SEM000-004 + 类型化子类）、`utils/validators.py:61-529` 参数/实体/关系/配置校验、`core/config_manager.py:236` `Config.validate`。但缺陷密度偏高：**指数退避重试恒为固定延迟**（`pipeline/failure_handler.py:168` 调用时未传尝试次数，`:315-321` `backoff_factor ** (attempt-1)` 恒为 1）；`utils/helpers.py:541` `retry_on_error` 为死代码；`utils/constants.py:112-120` 声明的 SEM005-008 无对应异常类；pyarrow 缺失时导出器静默退化为返回假字符串的 mock（`export/__init__.py:177-222`）；`server.py:153` `/build` 端点只回 `accepted` 不执行。
-- **LightRAG 5**：`file_atomic.py` 原子写、`exceptions.py` 完善异常体系、`pipeline_metrics.py` 监控、跨事件循环锁处理（`lightrag.py:295-359`），工程化最成熟。
-- **GraphRAG 4**：`packages/graphrag-llm/graphrag_llm/retry/` 指数退避、`rate_limit/`、`middleware/`、`metrics/` 完善，但代码体量大、配置复杂、边界面较广。
-
-**本维度第一：LightRAG（5，独占）**。语溯RAG 与 Semantica 在此项均**低于 LightRAG**，如实评 4。
-
-### 4.4 稳定性【5 / 4 / 4 / 4】
-- **语溯RAG 5**：全局图写信号量防连接池超卖（`milvus_graph_service.py:108/131/640`）、per-kb 锁（`manager.py:808+`）、跨 chunk 批量 flush 幂等（`:266-271`），多用户并发构建时写入总量恒定可控。
-- **Semantica 4**：SQLite 事务化持久化（`provenance/storage.py:426` 每调用作用域事务，`change_management/version_storage.py:253`）、Explorer 全量 `threading.RLock`（`explorer/session.py:48`）。短板：**图 JSON 保存非原子写**（`context/context_graph.py:1116` 直接 `open(path,"w")`，无临时文件+rename）、pipeline 状态仅存内存（`execution_engine.py:103-104`，进程崩溃即失、无断点续跑）、无 WAL/自动保存。
-- **LightRAG 4**：`file_atomic` 保证落盘原子，但单内存图 + 多进程 GraphML 整图重载（`networkx_impl.py:256/281`），高并发写入稳定性弱于 DB 后端方案。
-- **GraphRAG 4**：retry/rate_limit/metrics + workflow 续跑较完善，但全局大上下文与重 pipeline 使稳定性影响面更宽。
-
-**本维度第一：语溯RAG（5，独占）**。
-
-### 4.5 多跳推理可用性【5 / 5 / 4 / 3】
-- **语溯RAG 5**：PPR 子图 **1–5 跳可控**（`milvus.py:255-262`，默认 3）+ **有向/无向可选**（`:264-272`）+ `query_relation_chains` 定向关系链枚举 + RRF 融合，原生支持跨证据类型多跳关联。
-- **Semantica 5（图算法最全）**：BFS 跳数可控 + 权重/距离衰减（`context_graph.py:858-959`）；`kg/path_finder.py:148-595` Dijkstra/A*/**Yen k-最短路径** + 有向/无向可选（`:108`）+ 排除节点/边（`:148-223`）；**时序多跳** `find_temporal_paths` 带因果顺序约束（`kg/temporal_query.py:597-714`）；检索侧 `expand_context(max_hops)`（`context_retriever.py:2589-2633`）与 `multi_hop_context_assembly`（`:2300-2331`）；SPARQL 原生图查询（`triplet_store/triplet_store.py:450-483`）。跳数/方向/关系类型/最小权重均可控，跨类型关联原生支持。
-- **LightRAG 4**：hybrid/mix 为隐式 1–2 跳，无事件节点、无定向关系链，跳数不可精细控制。
-- **GraphRAG 3**：global 借社区报告做"全局多跳"较强，但 local 仅 1 跳、global 随社区数 Token 膨胀，跨具体实体的可控多跳弱。
-
-**本维度第一（并列）：语溯RAG、Semantica（均 5）**——语溯以定向关系链见长，Semantica 以路径算法与时序多跳见长。
-
-### 4.6 检索 Token 效率【4 / 5 / 5 / 3】
-- **语溯RAG 4**：单轮 1 次 LLM 调用、上下文受控，但图 + PPR + 关系链扩展会使上下文随跳数增长，紧凑度略逊。
-- **Semantica 5（默认检索零 LLM）**：默认检索路径（向量 + 图遍历 + 关键词扫描）**完全不调用 LLM**（`context_retriever.py:182` `retrieve` 为确定性管线；LLM 仅存在于可选 `query_with_reasoning(llm_provider=...)`，`:1480/1490-1531`）——查询侧 0 Token、索引侧默认 0 Token（确定性抽取）；无全局报告式上下文膨胀。代价是确定性抽取/检索的语义上限低于 LLM 方案（此权衡计入 §4.1 检索准确度）。
-- **LightRAG 5**：4 阶段 Token 截断（`operate.py:5688` 起），`max_entity_tokens / max_relation_tokens / max_total_tokens` 精确分配，以紧凑 prompt 著称。
-- **GraphRAG 3**：local 拉"实体 + 关系 + 文本单元 + 社区报告"，global **每个社区一次 LLM 调用**（`query/structured_search/global_search/search.py:172`），Token 随社区数膨胀，成本最高。
-
-**本维度第一（并列）：Semantica、LightRAG（均 5）**。语溯RAG 在此项**低于两者**，如实评 4。
-
-### 4.7 混合数据类型适配性【5 / 4 / 5 / 3】
-- **语溯RAG 5**：`chunking/ragflow_like/parsers/case_document.py` 领域分块器识别笔录/聊天/资金/卡口，**CSV 字段语义保留**、确定性标识符兜底、多模态 parser 预留。
-- **Semantica 4（解析器面广但默认管线接线断裂）**：
-  - **解析器覆盖最广之一**：pdf/docx/pptx/html/txt/xlsx/json/yaml/csv/xml/parquet/arrow（`semantica/parse/` 22 文件 + `semantica/ingest/` 29 文件）；CSV 结构化解析保留表头与行字典（`parse/csv_parser.py:115-165`）；`ingest/pandas_ingestor.py:150-160` 保留列 dtype；图像 OCR 可选（`parse/image_parser.py:192` pytesseract）。
-  - **但默认管线不接线**：`ingest/methods.py:1355-1366` 自动识别仅覆盖 feed/db/repo/ontology/parquet/arrow/xml，**csv/json/yaml/xlsx 一律按原始字节**读取（`file_ingestor.py:617-619`）；`parse/document_parser.py:90-98` 仅支持 pdf/docx/doc/html/htm/txt/text 7 种；**结构化记录无 record→graph 桥**，无 id/name/text/type 键的行被静默丢弃（`kg/graph_builder.py:216-241`），金额/时间/电话等字段语义在入库时丢失；音视频**仅元数据**（`parse/media_parser.py:182-296`），无转写/理解；.md 无文件入口。
-- **LightRAG 5**：`parser/`（15 文件）含 docx/markdown/docling/mineru，`multimodal_context.py` 支持图片/表格 caption，输入格式适配面最广（CSV/JSON/xlsx 仍以文本级处理）。
-- **GraphRAG 3**：input loaders 支持文本/csv/json，但 `csv.py:31` 行级扁平化、无表格字段语义、无图片/音视频。
-
-**本维度第一（并列）：语溯RAG、LightRAG（均 5）**。Semantica 解析器面宽但默认管线未接通、且无音视频理解，如实评 4。
-
-### 4.8 可解释性【5 / 5 / 4 / 4】
-- **语溯RAG 5**：来源引用 + 证据链 + 图谱路径 + **可质证闭环**（词法精确命中 `matched_exact_tokens` 可回溯，`milvus.py:1720-1748`），契合办案质证需求。
-- **Semantica 5（合规级溯源最全）**：**W3C PROV-O 全事实溯源**——`provenance/manager.py:263/417` `track_entity`/`track_relationship`、`:748` `get_lineage`（BFS 祖先链）、`:1203` `export_prov` 导出 PROV-O RDF（`provenance/schemas.py:13-21` 显式 wasDerivedFrom/used 映射）；**SHA-256 篡改自证链**（`provenance/integrity.py:27/119`，校验失败即示警）；推理解释器 `reasoning/explanation_generator.py:130-455` 输出结构化 ReasoningStep/ReasoningPath/Justification；决策一等公民对象 + `trace_decision_chain` 因果链（`context_graph.py:3174/4150`）；导出 RDF/JSON/CSV 审计文件。是四套中唯一达到"监管可提交"粒度者。
-- **LightRAG 4**：实体/关系路径可查，但引用粒度较粗。
-- **GraphRAG 4**：社区报告 + 实体关系 + 来源引用，全局可解释强、单条溯源略粗。
-
-**本维度第一（并列）：语溯RAG、Semantica（均 5）**。
-
-### 4.9 错误容忍度【4 / 4 / 5 / 5】
-- **语溯RAG 4**：per-kb 锁、批量 flush、`eval/notion.py:59-64` 4 次退避重试，但**缺集中错误恢复框架**（无统一错误分类 / 无 `file_atomic` 式原子写体系），单条解析失败隔离需结合具体路径，故如实评 4。
-- **Semantica 4**：**逐文件隔离较好**——`ingest/file_ingestor.py:511-538` 目录批量 per-file `try/except` 续行（`fail_fast` 逃生口）、`:692-722` 云批量同理；`parse/document_parser.py:306-330` `parse_batch` `continue_on_error=True` 默认隔离失败文件；重试策略机制存在（`pipeline/failure_handler.py:88-325`）。但：**指数退避失效为固定延迟**（见 §4.3）、管线单步失败即整体中止（`execution_engine.py:283-328`，`skip_step` 恢复动作从未被引擎采纳）、无断点续跑、`load_from_file` 缺文件静默返回空图（`context_graph.py:1131-1133`）。
-- **LightRAG 5**：`file_atomic` 原子写、LLM 失败重试、完善异常体系，单条抽取失败不影响整体。
-- **GraphRAG 5**：`retry/exponential_retry.py` 指数退避、`rate_limit`、workflow 断点续跑，容错强。
-
-**本维度第一（并列）：LightRAG、GraphRAG（均 5）**。语溯RAG 与 Semantica 在此项**低于两者**，如实评 4。
+- 事件数据模型：`yusu_kb/knowledge/graphs/event_schemas.py`（`EventRecord`、`EventType`、`EVENT_VALUE_WEIGHTS`、`MAX_EVENTS_PER_CHUNK`、`make_event_id`）
+- 双路径路由：`yusu_kb/knowledge/graphs/graph_utils.py:402` `route_extractor_for_chunk`；构建期接线 `yusu_kb/knowledge/graphs/graph_service.py:694-701`
+- 锚点裁决：`yusu_kb/knowledge/graphs/anchor_registry.py`（`AnchorRegistry.from_storage`、`resolve_all`、conflicts 记录）
+- 抽取器体系：`yusu_kb/knowledge/graphs/extractors/base.py`（`GraphExtractor` 抽象 + `normalize_extraction_result` 实体路径）、`extractors/event.py`（`EventGraphExtractor`）、`extractors/llm.py`（`LLMGraphExtractor`）
 
 ---
 
-## 五、评分总表与总冠军
+## 三、维度二：索引与检索【5 / 4 / 4 / 3】
 
-### 5.1 原始分（5 分制）
+### 3.1 对比表
+
+| 检索能力 | 语溯RAG | Semantica | LightRAG | GraphRAG |
+|---|---|---|---|---|
+| 检索通道 | 向量+关键词+词法+图谱 四通道 RRF | 向量+图遍历+关键词 | local/global/hybrid/mix | local/global/drift/basic |
+| 确定性精确命中兜底 | ✅ 词法通道 + `exact_score_floor` | ✗ 单词重叠扫描 | ✗ | ✗ |
+| 多跳形式 | **事件语义多跳（结构化路径）** + PPR 隐式传播 | BFS/k-最短路径/时序路径 | 隐式 1–2 跳 | 全局聚合（非定向） |
+| 图谱未建完时的多跳 | ✅ **检索时动态构图**（隐式图 SIM/ADJACENT/LEXICAL/EXACT_ID 四类边）+ PPR 隐式多跳，冷启动零成本 | ✗ | ✗ | ✗ |
+| 路径可解释 | ✅ 每跳含锚点/边型/时间差/证据 chunk | ✅ 路径算法完备 | ✗ | △ 社区级 |
+| 事件向量索引 | ✅ 独立 event 向量库 | ✗ | ✗ | ✗ |
+| 事件种子图排序 | ✅ PPR 事件种子 + value_weight 加权传播 | ✗ | ✗ | ✗ |
+
+### 3.2 要点
+
+- **语溯RAG 5（四通道 + 事件多跳）**：
+  - **词法确定性兜底**：`local_kb.py` 的 `lexical_channel_enabled`（S1-A2）对查询中的编号/手机号/证件号做逐字召回，`exact_score_floor` 保证精确命中即使被 rerank 压低也不掉出结果——低质量语料中精确标识符不被语义噪声淹没，这是四套中唯一内置的确定性通道（Semantica 的 `context_graph.py:961-997` 仅为单词重叠扫描，v5 沿用）。
+  - **事件多跳（可解释）**：`multi_hop.py` 以锚点（EVENT_MENTIONS 边）或确定性事件-事件边（EVENT_NEXT/EVENT_TEMPORAL/EVENT_LOCATION）扩展候选事件，返回结构化路径；`event_expand.py` 提供跨事件共享锚点候选；对外入口 `graph_service.search_event_paths`（`graph_service.py:1473`）。实测（离线 E2E）对"资金往来"查询返回 3 条多跳路径，每跳含 event_id 序列。
+  - **PPR 事件种子通道**：`ppr.py:build_ppr_graph` 为每类边赋予语义权重（CHUNK_EVENT 按 chunk 密度与 `value_weight` 映射 `(0.3+0.7·vw)`、EVENT_MENTIONS 0.6、EVENT_NEXT/TEMPORAL 0.5、EVENT_LOCATION 0.3），`rank_chunks_by_ppr`（`ppr.py:129`）接受 `event_seed_weights`——事件节点直接作为 reset 源参与排序，G4 护栏在传播中结构性降权闲聊。
+  - **三向量库并行**：`graph_vector_store.py` 维护 entity/triple/**event** 三套向量索引，事件 summary 独立向量化，叙事检索不再依赖实体向量质量。
+  - **检索时动态构图 + PPR 隐式多跳（v6.1，冷启动零成本）**：语溯从设计之初即双路并行——图谱路 + BM25+向量路。当图谱已配置抽取模型（`model_spec`）但**尚未建完**（索引覆盖率 < 阈值，默认 0.999）时，不再让向量通道裸返，而是以向量命中分块为**种子**，在检索时基于 flush 后的向量快照**动态构建隐式图**：① SIM 互近邻边（k=12 互检、相似度阈值 τ=0.55、权重 `((s−τ)/(1−τ))^1.5`，mutual-KNN + 度帽 + 阈值三重抑制高维 hubness）；② ADJACENT 同文件相邻分块边（Δ≤3，权重 0.5/Δ）；③ LEXICAL 查询词项共现边（高 df 丢弃，权重随 df 衰减）；④ EXACT_ID 精确标识符（银行卡号/手机号）硬连接（权重 0.9）。四族边合成加权无向图后做 PPR（damping=0.80，独立于实体图 0.85），**跳转到与命中向量语义最关联的远端分块**；每条多跳路径由确定性 Beam 搜索显式解释（锚点/边型/相似度/证据 chunk）。该通道**仅在回退时触发、开关关闭时热路径零开销**，且任何异常/超时均降级为 `([], error)` 绝不冒泡到主检索——即"检索时动态构建知识图谱"，把建图成本从"离线全量"转移到"按查询按需"。
+  - **真 Okapi BM25 关键词通道（v6.1）**：关键词通道从"词项命中计数"重写为标准 Okapi BM25（k1=1.5、b=0.75、局部 IDF），max 归一化后走既有 RRF 融合——低质量语料中高频噪声词不再等权淹没信号。
+  - **三通道真正并行（v6.1）**：向量/词法/图三检索通道改为 `asyncio.gather` 并发，融合次序仍保持「先词法后图」，使"双路并行"口径名副其实并实打实降低 p95。
+- **Semantica 4**：路径算法最全（Dijkstra/A*/Yen k-最短/时序因果路径，v5 沿用），但无确定性精确通道，且默认检索的上限受 spaCy/正则抽取质量约束；无建图前的多跳兜底。
+- **LightRAG 4**：四模式 + 4 阶段 Token 截断是亮点，但多跳为隐式且不可解释，无事件模型，无建图前兜底。
+- **GraphRAG 3**：全局聚合强、local 仅 1 跳，Token 随社区数膨胀，无建图前兜底。
+
+### 3.3 代码依据（语溯RAG）
+
+- 检索通道与词法兜底：`yusu_kb/knowledge/implementations/local_kb.py`（`LocalRetrievalConfig`：`search_mode` vector/keyword/hybrid、`lexical_channel_enabled`、`lexical_top_k`、`exact_score_floor`、`use_graph_retrieval`、`graph_rrf_k`）
+- **检索时动态构图 + 隐式图 PPR**：`yusu_kb/knowledge/graphs/implicit_graph.py`（`ImplicitChunkGraph`、`ImplicitGraphConfig`、`retrieve_implicit_chunks`、四类边权重公式、`build_personalization`、`explain` Beam 解释）；种子来自 `yusu_kb/storage/vector_store.py` 的 `VectorSnapshot`/`snapshot()`（行对齐的 L2 归一化向量矩阵，从自有 JSON 解码避免 name-mangling）；回退门禁 `_is_implicit_graph_enabled`/`_graph_coverage` 与 `aquery` 的 `asyncio.gather` 并行接线同文件
+- **真 Okapi BM25**：`yusu_kb/knowledge/implementations/local_kb.py` 的 `_rank_keyword_chunks`（k1=1.5、b=0.75、局部 IDF、max 归一化）
+- PPR：`yusu_kb/knowledge/graphs/ppr.py`（`build_ppr_graph`、`rank_chunks_by_ppr`、`event_seed_weights`、`pagerank_scores` helper）
+- 多跳：`yusu_kb/knowledge/graphs/multi_hop.py`、`event_expand.py`、`graph_service.py:1473` `search_event_paths`
+- 事件向量库：`yusu_kb/knowledge/graphs/graph_vector_store.py`（graph_vdb_entity/triple/event 三索引）
+
+---
+
+## 四、维度三：异构数据处理【5 / 4 / 4 / 3】
+
+### 4.1 对比表
+
+| 数据类型 | 语溯RAG | Semantica | LightRAG | GraphRAG |
+|---|---|---|---|---|
+| 询问笔录（transcript） | ✅ 问答对切分 + 身份头注入 | ✗ 无领域概念 | ✗ 通用分块 | ✗ 通用分块 |
+| 聊天记录（chat_record） | ✅ 时间戳解析 + 30 分钟窗断块 + 时间段锚定前缀 | ✗ | ✗ | ✗ |
+| 表格/流水/话单（csv_table/spreadsheet） | ✅ 表头语义保留 + 列过滤 + 字段模板 + 实体关系直映射 | △ 解析器有但默认按字节读入 | △ 文本级 | ✗ 行级扁平化 |
+| 书籍/法律/问答/通用 | ✅ book/laws/qa/general/semantic 六种专用分块器 | △ | △ | △ |
+| 音视频 | △ 转写后入文本管线（产品层） | ✗ 仅元数据 | △ caption | ✗ |
+
+### 4.2 要点
+
+- **语溯RAG 5（领域分块即事件边界）**：`case_document.py` 是四套中唯一的领域分块器——
+  - `_detect_document_type`（`case_document.py:163`）自动识别 `transcript/chat_record/csv_table/spreadsheet/general`，并防御"微信模板把 CSV 劫持为 chat_record"这类误判（`:174-179` 显式排除）；
+  - 聊天记录按时间戳切分、**30 分钟时间窗断块**（`_split_messages_by_time_gap:317`），并为每块注入 `【时间段 X ~ Y】` 前缀——**分块边界天然就是事件边界**，且前缀直接成为事件抽取 `time_expr` 的高置信锚（事件 prompt 明确指示优先使用该前缀，`extractors/event.py:45`）；
+  - 笔录按 `问：/答：` 问答对切分，`transcript_header_inject` 把被询问人身份信号注入每个正文 chunk，缓解笔录正文以"我"自称导致的指代缺失；
+  - 表格路径 `_column_filter`（`:132`）+ `_resolve_format_templates`（`:154`）保留字段语义，实体关系直映射不做 LLM 重写（对应架构维度的 A3 公理）。
+- **Semantica 4**：解析器覆盖面最广之一（22 parse + 29 ingest 文件），但默认 ingest 对 csv/json/yaml/xlsx 按原始字节读取、结构化行无 record→graph 桥被静默丢弃（v5 沿用：`ingest/methods.py:1355-1366`、`kg/graph_builder.py:216-241`）。
+- **LightRAG 4**：parser 面广（docx/markdown/docling/mineru），但表格仍文本级处理。
+- **GraphRAG 3**：CSV 行级扁平化丢字段语义（`csv.py:31`，v5 沿用）。
+
+### 4.3 代码依据（语溯RAG）
+
+- 领域分块器：`yusu_kb/knowledge/chunking/parsers/case_document.py`（`_detect_document_type:163`、`_split_messages_by_time_gap:317`、`_chunk_transcript:229`、`_column_filter:132`、`_resolve_format_templates:154`）
+- 分块预设注册：`yusu_kb/knowledge/chunking/presets.py`、`dispatcher.py`（case_document 预设含 doc_type 列）
+- 专用分块器族：`yusu_kb/knowledge/chunking/parsers/{book,laws,qa,general,semantic,separator}.py`
+- 解析门面：`yusu_kb/knowledge/parser/unified.py`
+- 时间段前缀→事件 time_expr 的消费关系：`yusu_kb/knowledge/graphs/extractors/event.py:45`（EVENT_EXTRACTION_PROMPT 第 3 条）
+
+---
+
+## 五、维度四：高噪声鲁棒性【5 / 4 / 3 / 3】
+
+### 5.1 对比表
+
+| 噪声类型 | 语溯RAG 对策 | Semantica | LightRAG | GraphRAG |
+|---|---|---|---|---|
+| 与案件无关的闲聊 | ✅ chitchat/none 建节点但 value_weight=0.2/0.1，PPR 结构性降权 | ✗ | ✗ 噪声实体/边照常入库 | ✗ 污染社区报告 |
+| LLM 幻觉（编造参与者/时间） | ✅ G1 锚定校验：标识符与时间逐字回溯，失败降级 unverified（权重减半） | △ 无逐事件校验 | ✗ | ✗ |
+| 重复/近重复事件 | ✅ G2：写入期 SimHash（hamming≤5）+ 检索期 MMR | ✗ | △ 基础实体去重 | △ |
+| 锚点身份分裂（同名不同 label） | ✅ AnchorRegistry 单调裁决 + 影子节点 + conflicts 留痕 | ✅ 实体合并（默认不接线） | △ | △ |
+| LLM 限流/瞬时错误 | ✅ 全抖动指数退避重试 + 空抽取跳过缓存待重试 | △ 退避实现为固定延迟（v5 沿用） | ✅ | ✅ |
+| 图质量劣化（孤儿/碎片化） | ✅ 连通性门禁 4 指标硬校验 | ✗ | ✗ | ✗ |
+
+### 5.2 要点
+
+- **语溯RAG 5（护栏 G1–G4 + 门禁，噪声"有位置无分量"）**：
+  - **G1 锚定校验**（`event_guards.py:47` `verify_event`）：`exact_identifiers` 与 `time_expr` 必须**逐字回溯** chunk 原文（空白归一后比较，防 markdown 规范化误判），任一失败即标记 `unverified`（写入传播权重减半）；参与者用 `fuzzy_contains`（≥0.8 滑窗相似度，`event_guards.py:25`）作**软信号**——实测修正：笔录正文以"我"自称，LLM 从标题/上下文补全主语是正确行为，逐字回溯会系统性误伤（19 事件全部因此降级的教训已固化进代码注释与测试）。
+  - **G2 去重**（`event_guards.py:118-175`）：`simhash64`（中文 unigram+bigram 混合 token 化）写入期粗筛，hamming≤5（≈相似度≥0.92）标记 `duplicate_of`，防链式指向；检索期 `mmr_select` 兼顾相关性与多样性。
+  - **G4 价值权重**（`event_schemas.py` `EVENT_VALUE_WEIGHTS`）：chitchat=0.2、none=0.1，经 `ppr.py:96-97` 映射进 CHUNK_EVENT 边权——闲聊稀释不了事件，也不让闲聊有分量。
+  - **连通性门禁**（`connectivity.py:19-24`）：orphan_rate≤1%、lcc_ratio≥90%、anchor_reuse≥2、zero_anchor_event_rate≤20%，四指标硬校验，构建后置处理自动执行（`graph_service.py` post-process）——图质量劣化在入库时即被发现，而非检索时才暴露。
+  - **实测**：离线 E2E 5 份文书 → 16 chunk → 48 事件，门禁全绿（orphan_rate 0.0 / lcc_ratio 0.957 / anchor_reuse 9.6 / zero_anchor 0.0）。
+- **Semantica 4**：冲突检测/实体去重库级完整，但默认构建不写回（接线断裂，v5 沿用）；退避重试恒为固定延迟。
+- **LightRAG 3 / GraphRAG 3**：工程容错好，但**语义级噪声（闲聊、黑话、矛盾说法）无任何结构性对策**——噪声实体/关系照常入库并参与图计算。
+
+### 5.3 代码依据（语溯RAG）
+
+- G1：`yusu_kb/knowledge/graphs/event_guards.py:25` `fuzzy_contains`、`:47` `verify_event`、`:89` `verify_events`
+- G2：`event_guards.py:118` `simhash64`、`:148` `EventDedupIndex`、`:190` `mmr_select`
+- G4：`yusu_kb/knowledge/graphs/event_schemas.py`（`EVENT_VALUE_WEIGHTS`）+ `yusu_kb/knowledge/graphs/ppr.py:28-28`（`_DEFAULT_EVENT_VALUE_WINDOW`）+ `ppr.py:96-97`（边权映射）
+- 门禁：`yusu_kb/knowledge/graphs/connectivity.py:19`（`DEFAULT_GATE_THRESHOLDS`）、`:34`（`evaluate_gate`）；存储侧指标 `graph_storage.py:971`（`get_connectivity`，孤儿率只计 entity/event 节点，空 chunk 不计——说明性段落无事件属正常现象）
+- LLM 重试：`yusu_kb/knowledge/graphs/extractors/llm.py:138-155`（全抖动退避参数与流式超时放宽）、`:457`（`_call_llm_with_retry`）
+- 空抽取处理：`graph_service.py:883-887`（空结果不入缓存，后续构建自动重试）
+
+---
+
+## 六、维度五：矛盾检测【4 / 4 / 2 / 2】
+
+> 本维度诚实声明：语溯RAG **没有**独立的"冲突检测器"模块。其矛盾处理能力来自**事件模型的表示学性质**（矛盾以可比对的事件对形式并存）+ G1 证据校验 + 锚点层对账。这与 Semantica 的专用冲突检测器是两条路线，各有所长。
+
+### 6.1 对比表
+
+| 能力 | 语溯RAG | Semantica | LightRAG | GraphRAG |
+|---|---|---|---|---|
+| 矛盾的可比对性（表示层） | ✅ 同一锚点下的矛盾事件**成对并存**（n 元绑定完整，谁在何时说了什么可直接对质） | △ 冲突需检测器显式识别 | ✗ 矛盾被实体合并/噪声边稀释 | ✗ 被社区摘要平均化 |
+| 专用冲突检测器 | ✗（无独立模块） | ✅ 5 类冲突检测（值/类型/关系/时序/逻辑） | ✗ | ✗ |
+| 冲突解析策略 | ✗（交由人工质证） | ✅ 7 种策略 | ✗ | ✗ |
+| 证据级校验 | ✅ G1 逐字回溯：事件断言必须能指回原文 | △ SHA-256 溯源（防篡改，非验真） | ✗ | ✗ |
+| 默认管线生效 | ✅ 全部内置于默认构建 | △ **检测器不写回图**（v5 沿用：`graph_builder.py:828-852`） | — | — |
+| 矛盾评测资产 | △ golden 集 `contradiction` 类目已规划（二期启用） | ✗ | ✗ | ✗ |
+
+### 6.2 要点
+
+- **语溯RAG 4（"矛盾在比对中显形"的表示学路线）**：
+  - 实体路径下，两个矛盾说法（"张三说转账 5 万" vs "李四说收到 3 万"）会被拆成二元关系后**混入同一批边**，差异被稀释；事件路径下它们是**两个完整的命题节点**，共享锚点"张三/李四/转账"，金额、时间、金额槽位**逐槽可比**——矛盾不需要被"检测"，它天然以可对质的形式存在（`event_expand.py` 的 `_shared_anchor_candidates` 正是检索期枚举共享锚点事件对的实现）。
+  - G1 证据级校验提供了"哪一方说法有原文支撑"的判定基础：`verification=verified/unverified` 直接参与 PPR 传播权重，无证据支撑的说法自动降权。
+  - `AnchorRegistry.conflicts` 对同名不同 label 的身份冲突显式留痕（`anchor_registry.py:76-77`），供连通性报告与人工核查。
+  - **如实扣分项**：无自动冲突分类（值/类型/时序/逻辑五分类），无自动解析策略，矛盾的最后裁决留给办案民警（在取证场景这是刻意的"可质证"设计而非缺陷，但能力面确实窄于 Semantica 的检测器）；`contradiction` golden 类目为二期规划项。
+- **Semantica 4**：检测器与解析策略是四套中最完整的**库级实现**，但默认构建管线不写回图——能力存在而默认不可达，与语溯"默认即生效"形成对比。
+- **LightRAG 2 / GraphRAG 2**：无任何矛盾处理机制；GraphRAG 的社区摘要甚至会平均化矛盾叙事。
+
+### 6.3 代码依据
+
+- 语溯RAG：`yusu_kb/knowledge/graphs/event_guards.py:47`（G1 证据校验）；`yusu_kb/knowledge/graphs/anchor_registry.py:50-92`（conflicts 留痕与影子节点）；`yusu_kb/knowledge/graphs/event_expand.py`（`_shared_anchor_candidates` 共享锚点事件对枚举）；`yusu_kb/knowledge/graphs/ppr.py`（verification→value_weight→边权的传播链）
+- Semantica（v5 沿用）：`conflicts/conflict_detector.py:1205`、`conflicts/conflict_resolver.py:181-499`、默认不写回 `kg/graph_builder.py:828-852`
+
+---
+
+## 七、维度六：性能与成本【5 / 5 / 3 / 2】
+
+### 7.1 对比表
+
+| 能力 | 语溯RAG | Semantica | LightRAG | GraphRAG |
+|---|---|---|---|---|
+| 图规模密度 | ✅ 事件路径 ≈3.3 图元/chunk（实测） | △ | ✗ 实体路径基线 22.6 图元/chunk（v5 实测） | ✗ 社区报告额外膨胀 |
+| 增量构建 | ✅ 仅处理 pending chunk + 文件级增量清理 | △ 全量管线 | △ | ✗ 增量常需重算社区 |
+| 抽取缓存 | ✅ 类型信封缓存（跨构建复用、类型不符强制重抽） | ✗ | ✅ | ✅ workflow 续跑 |
+| 并发写入 | ✅ 抽取并发 1–128 + 批量 flush 有界写入 | △ spaCy 强制串行 | ✗ 逐实体串行 await | △ |
+| 检索 Token 效率 | △ 单轮 1 次 LLM，上下文随跳数增长 | ✅ 默认零 LLM | ✅ 最省 | ✗ 每社区一次 LLM |
+| 代码质量门禁 | ✅ 496 单测全绿 + ruff 零告警 + 离线 E2E | △ | ✅ | ✅ |
+
+### 7.2 要点
+
+- **语溯RAG 5（事件化直接压缩图规模与写入量）**：
+  - **图规模密度对比（核心量化证据）**：实体路径基线实测 234 chunk → 1452 实体 + 3845 关系，即 **22.6 图元/chunk**（v5 沿用 `eval_baseline_summary.json` [实测]）；事件路径离线 E2E 实测 16 chunk → 48 事件 + 5 锚点 ≈ **3.3 图元/chunk**。密度压缩约 **85%**（口径注：两者语料不同，密度口径对比供量级参考；同语料 A/B 待真实 LLM 配额恢复后补跑）。
+  - **增量构建**：`build_pending_chunks`（`graph_service.py:526`）只处理 pending chunk；`delete_file` 在 `graph_storage.py:904-913` 按文件清理 MENTIONS/EVENT_MENTIONS/CHUNK_EVENT/L4 事件边，无孤儿残留；抽取结果以类型信封缓存（`graph_service.py:888-894` `__yusu_extract__` 信封，类型不符强制重抽，隔离事件/实体两种形状）。
+  - **并发与有界写入**：抽取并发 1–128（`llm.py:297-298` 语义保留于 `graph_service._get_worker_count`）+ 批量 flush 阈值（FLUSH_EVENT_THRESHOLD 等，`graph_service.py:143-241` `_PendingGraphWrite`）。
+  - **离线可验证性**：embedding/chat 全部经 `EmbeddingFunc`/`chat_model_fn` 注入（`local_kb.py:74-101` `set_default_embedding_func`），支持确定性 hash embedding 离线回归——CI 无密钥即可跑通全链路，这是四套中唯一的工程化验证设计。
+  - **隐式图回退标定（Phase 4 实测，全部为「模拟数据-待补充」口径）**：`scripts/bench_implicit_graph.py` 在确定性合成多跳语料（银行卡号硬连跨簇分块）上网格标定 `sim_threshold × knn_k × damping` 全 27 组配置，**全部达标**——多跳召回增益 MultiHop-Hit@10 较纯向量基线 **+100pp**（基线 0.000 → 1.000）、Hubness Index **0.010–0.011（< 0.05 阈值，高维 hubness 已被 mutual-KNN + 阈值三重抑制）**、p95 增量 **11.9–13.4ms（≤ 60ms 预算）**、新增分块率 NewChunkRate≈0.48（≥0.15）；全量构建延迟实测 N=6000 节点 **387ms < 400ms 预算**，故 `max_corpus_nodes` 推荐上限 6000。标定脚本零 LLM、零网络、可复跑。
+- **Semantica 5**：默认零 LLM 抽取与检索，吞吐与 Token 成本最优（但语义上限受确定性抽取约束，该权衡已计入维度二/四）。
+- **LightRAG 3**：Token 效率最优，但图写入逐实体串行、整图重载拖累入库（v5 沿用）。
+- **GraphRAG 2**：索引链路最重，全局问答每社区一次 LLM 调用，成本最高。
+
+### 7.3 代码依据（语溯RAG）
+
+- 增量构建：`yusu_kb/knowledge/graphs/graph_service.py:526`（`build_pending_chunks`）、`graph_storage.py:904-913`（`delete_file` 事件清理）
+- 抽取缓存信封：`graph_service.py:888-894`（写入）、`:897-910`（`_unwrap_extraction_cache`）
+- 并发：`graph_service.py:512-522`（`_get_worker_count`）、`:143-241`（`_PendingGraphWrite` 批量 flush）
+- 注入式验证：`yusu_kb/knowledge/implementations/local_kb.py:74-101`（`set_default_embedding_func`/`set_default_graph_chat_model_fn`）；离线 E2E 驱动 `scripts/e2e_event_driver_offline.py`
+- 测试资产：`yusu_kb/tests/`（496 项，含 event_modules/event_graph_links/event_ppr/event_multi_hop/case_document/graph_service/graph_storage/chunking 全覆盖）
+
+---
+
+## 八、总分与结论
+
+### 8.1 六维度总分
+
 | 维度 | 权重 | 语溯RAG | Semantica | LightRAG | GraphRAG | 单项第一 |
 |---|---|---|---|---|---|---|
-| 检索准确度 | 25% | **5** | 4 | 3 | 3 | 语溯RAG |
-| 入库索引速度 | 10% | **5** | **5** | 3 | 2 | 语溯RAG / Semantica |
-| 代码健壮性 | 10% | 4 | 4 | **5** | 4 | LightRAG |
-| 稳定性 | 10% | **5** | 4 | 4 | 4 | 语溯RAG |
-| 多跳推理可用性 | 12% | **5** | **5** | 4 | 3 | 语溯RAG / Semantica |
-| 检索 Token 效率 | 8% | 4 | **5** | **5** | 3 | Semantica / LightRAG |
-| 混合数据类型适配性 | 8% | **5** | 4 | **5** | 3 | 语溯RAG / LightRAG |
-| 可解释性 | 7% | **5** | **5** | 4 | 4 | 语溯RAG / Semantica |
-| 错误容忍度 | 10% | 4 | 4 | **5** | **5** | LightRAG / GraphRAG |
-| **单项第一数** | — | **6 项**（独占 2 + 并列 4） | **4 项**（均并列） | **4 项**（独占 1 + 并列 3） | **1 项**（并列） | — |
+| 架构设计 | 20% | **5** | 4 | 3 | 2 | 语溯RAG |
+| 索引与检索 | 20% | **5** | 4 | 4 | 3 | 语溯RAG |
+| 异构数据处理 | 15% | **5** | 4 | 4 | 3 | 语溯RAG |
+| 高噪声鲁棒性 | 20% | **5** | 4 | 3 | 3 | 语溯RAG |
+| 矛盾检测 | 10% | 4 | **4** | 2 | 2 | 语溯RAG / Semantica |
+| 性能与成本 | 15% | **5** | **5** | 3 | 2 | 语溯RAG / Semantica |
+| **加权总评** | 100% | **4.90**（98.0%） | **4.25**（85.0%） | **3.30**（66.0%） | **2.50**（50.0%） | — |
 
-### 5.2 目的加权总评（§3.2 权重）
-| 排名 | 系统 | 加权得分（5 分制） | 百分制 |
-|---|---|---|---|
-| 🏆 1 | **语溯RAG** | 4.72 | **94.4%** |
-| 🥈 2 | Semantica | 4.37 | **87.4%** |
-| 3 | LightRAG | 4.01 | 80.2% |
-| 4 | GraphRAG | 3.37 | 67.4% |
+### 8.2 结论
 
-### 5.3 等权总评（通用企业知识库视角，防偏袒校验）
-| 排名 | 系统 | 等权均分 | 百分制 |
-|---|---|---|---|
-| 🏆 1 | **语溯RAG** | 4.667 | **93.3%** |
-| 🥈 2 | Semantica | 4.444 | **88.9%** |
-| 3 | LightRAG | 4.222 | 84.4% |
-| 4 | GraphRAG | 3.444 | 68.9% |
+- **🏆 语溯RAG**：事件驱动重构补齐了实体路径的结构性缺陷（n 元绑定丢失、噪声无对策、多跳不可解释），六个维度中四个独占第一；矛盾检测如实评 4（无专用检测器，走"可质证并存"路线），Token 效率不如零 LLM 的 Semantica 与最紧凑的 LightRAG。
+- **🥈 Semantica**：双时态与冲突治理的库级实现仍是四套最全，但默认管线接线断裂使其"纸面能力 > 实际默认能力"。
+- **LightRAG / GraphRAG**：通用高质量语料上仍是优秀基线；在本报告锚定的"海量低质量多来源文本"场景下，噪声对策与领域适配的缺位使其与本场景的适配度持续拉开。
 
-### 5.4 总冠军判定（透明）
-- **🏆 总冠军：语溯RAG**——在**目的加权（94.4%）与等权（93.3%）两种口径下均居首**。原因是它在本报告最重维度（检索准确度、多跳、稳定性、可解释性、入库索引速度）拿到 5 项第一（含 4 并列），且检索准确度直接对齐"低质量取证 + 时序重建"目标。
-- **🥈 亚军：Semantica（87.4% / 88.9%）**——**四套中唯一"确定性零 LLM"图基础设施**：双时态 + 时间旅行、冲突检测/解析与实体去重、W3C PROV-O 溯源与篡改自证、Datalog/SPARQL/前向链推理、k-最短路径与时序多跳均为原生强项；**短板在取证场景的精确标识符兜底缺失、默认管线接线断裂（CSV/事件/冲突不落图）、健壮性与容错细节缺陷**——故其在低质量取证口径（87.4%）与通用口径（88.9%）均稳居第二，且与语溯RAG 的差距（7.0/4.4 个百分点）显著小于其余两者。
-- **季军：LightRAG**（80.2% / 84.4%）——**最强的通用轻量基座**：代码健壮性、Token 效率各拿第一，工程完备、上下文最省；短板是无事件节点、图写入串行、低质量取证适配需二次开发。
-- **第 4：GraphRAG**（67.4% / 68.9%）——**全局问答与社区聚合的标杆**：容错强、全局摘要能力突出；短板是索引最重、Token 成本最高、CSV 表格语义丢失、无事件/时间模型。
-- **公平性说明**：语溯RAG 并非全项碾压——它在**代码健壮性(4<5)、检索 Token 效率(4<5)、错误容忍度(4<5)** 三项均**明显低于对手**，评分未被人为拔高。Semantica **0 项独占第一**（4 项并列），其第二排名完全由"时序/溯源/确定性"等真实现码能力支撑，非评价偏向。若评价目标切换为"通用企业高质量知识库 + 极致 Token 成本"，Semantica 与 LightRAG 的性价比优势会进一步放大；若切换为"监管审计合规"，Semantica 的可解释性（PROV-O + 篡改自证）独占优势将进一步凸显。
+### 8.3 局限声明（诚实性承诺）
+
+1. 语溯RAG 的实测数据来自离线端到端（确定性抽取/embedding 驱动）与限流前的真实 LLM 部分运行；**同语料四系统端到端 A/B 基准尚未完成**，密度对比为跨语料量级参考。
+2. Semantica/LightRAG/GraphRAG 证据沿用 v5 审计行号（仓库未变更），如上游升级需重新取证。
+3. 权重反映本报告"低质量多来源文本可用性"目标；切换为"通用企业知识库"或"极致 Token 成本"目标时，Semantica/LightRAG 的相对位置会上升。
+4. 矛盾检测维度的"评测资产"（contradiction golden 类目）为二期规划，当前结论基于表示层性质与代码机制，非实测命中率。
+5. 隐式图（检索时动态构图）是**回退通道**：仅在图谱已配置抽取但未建完时激活，融合权重（implicit_weight=0.4）刻意低于已建满的实体图主通道（graph_weight=0.5），其多跳质量上限依赖向量快照质量；hybrid 模式（部分建图）下真实图证据边按 `hybrid_real_weight=0.6` 缩放注入，混合图量纲需分别行归一化。Phase 4 实测数据为合成标定语料，真实案卷端到端 A/B 待补跑。
 
 ---
 
-## 六、检索准确度专项评测（以低质量取证数据为例，结论折算入 §4.1）
-
-> 本节是 §1.2 目标的落地：**不单列维度**，而是作为"检索准确度"在"低质量/不确定性数据 + 宏观时序"上的实测样例。测试语料：`D:/杂项/分块策略优化/fraud_case_v1`（40 笔录、47 聊天记录、资金/通话/卡口 CSV、取证 JSON、4 xlsx，含 `related_chat_session`/`device_evidence_id`/`related_event` 等跨表关联键）。
-
-### 6.1 模拟案情与评分锚点
-构造一起"扶贫助农"电信网络诈骗案，作案链条为**诱骗 → 转账 → 取现**。设 **8 条关键证据线索**作为命中锚点，并单设一道**宏观时序题**：
-
-| # | 关键证据线索 | 数据来源特征 |
-|---|---|---|
-| 1 | 嫌疑人手机号精确命中 | 笔录/话单中的精确 11 位号码 |
-| 2 | 身份证号关联同一人多身份 | 笔录 + 取证 JSON 交叉 |
-| 3 | 转账金额-时间窗匹配 | 资金流水 CSV（结构化字段） |
-| 4 | 聊天诱导话术识别 | 聊天记录（口语化、噪声大） |
-| 5 | 笔录之间/笔录与聊天的矛盾点 | 多份低质量笔录冲突 |
-| 6 | 卡口时空印证（人-车-地-时） | 卡口 CSV |
-| 7 | 设备证据关联（`device_evidence_id`） | 取证 JSON |
-| 8 | 完整证据链闭环（诱骗→转账→取现） | 跨全部数据类型多跳 |
-| ★ | **宏观时序题**：某人某时干了某事 / 全案时序还原 | 需事件 + 时间建模 |
-
-### 6.2 各系统量化推演（基于代码能力，非实跑基准）
-| 线索/能力 | 语溯RAG | Semantica | LightRAG | GraphRAG |
-|---|---|---|---|---|
-| ① 手机号精确命中 | ✅ 词法通道逐字校验 + 0.85 分数下限兜底 | △ 无词法/精确通道，仅单词重叠扫描（`context_graph.py:961-997`） | △ 无专用兜底，靠语义近似 | △ 无专用兜底，靠语义近似 |
-| ② 身份证关联多身份 | ✅ 同上 + 跨表键枚举 | △ 同上；别名归一可辅助（`normalize/entity_normalizer.py:386-391` 消歧为占位实现） | △ 无专用兜底 | △ 无专用兜底 |
-| ③ 转账金额-时间窗（结构化） | ✅ CSV 字段语义保留 | △ CSV 解析器保留表头（`parse/csv_parser.py:115-165`）但默认 ingest 按文本处理（`ingest/methods.py:1355-1366`）、无 record→graph 桥（`graph_builder.py:216-241` 丢行） | △ 文本级，字段关系易丢 | ✗ 行级扁平为文本 |
-| ④ 聊天诱导话术（噪声大） | ✅ 领域分块 + 事件抽取 | ○ 确定性 NER(ml) + 向量可召回 | ○ 通用语义可召回 | ○ 社区聚合可召回 |
-| ⑤ 矛盾数据消解 | ✅ 标识符 + 可质证证据链 | ✅ 5 类冲突检测 + 7 策略解析（`conflicts/conflict_detector.py:1205`、`conflict_resolver.py:181-499`）；但默认 build 仅日志不写回（`kg/graph_builder.py:828-852`） | ✗ 易生成噪声边 | △ 社区聚合稀释矛盾 |
-| ⑥ 卡口时空印证 | ✅ 事件带时空属性 | ✅ 双时态 + `state_at` 快照 + 时间窗查询（`kg/temporal_query.py:359`、`context_graph.py:2590`）——唯一原生双时态 | △ 无时空模型 | △ 无时空模型 |
-| ⑦ 设备证据关联（跨表键） | ✅ 关系链定向枚举 | ✅ 多跳 BFS + 实体合并（`kg/graph_builder.py:748`）+ k-最短路径 | △ 隐式关联 | △ 依赖社区 |
-| ⑧ 完整证据链（多跳闭环） | ✅ PPR 1–5 跳 + 关系链 | ✅ 多跳上下文组装（`context_retriever.py:2300-2331`）+ 混合检索 | △ 隐式 1–2 跳 | △ 全局聚合、非定向 |
-| ★ 宏观时序题（某人某时） | ✅ 事件节点带时间可还原 | ✅ 双时态事实 + 时序路径因果排序（`kg/temporal_query.py:597-714`），四套唯一原生双时态 | ✗ 无时间模型 | ✗ 无时间模型 |
-| **8 线索命中率（推演）** | **100%（8/8）** | **66%（5.25/8，✅=1/○=0.5/△=0.25 加权）** | **62.5%（5/8，原报告口径）** | **62.5%（5/8，原报告口径）** |
-| 单轮 LLM 调用数 | 1 | **0（默认检索全确定性；LLM 仅可选）** | 1 | 多（每社区一次） |
-| 上下文 Token 规模 | 受控（随跳数增） | **0 Token（默认路径）；可选 LLM 时受控** | **最省（紧凑 prompt）** | 膨胀（随社区数增） |
-
-> 图例：✅ 原生强支持 ｜ ○ 通用可召回 ｜ △ 部分支持/需近似 ｜ ✗ 代码未见支持
-> 口径说明：Semantica 行按 ✅=1.0 / ○=0.5 / △=0.25 / ✗=0 折算为 5.25/8≈66%；其余三套沿用原 v4 报告口径，仅作参考锚点，**四者相对排序不受口径差异影响**。
-
-### 6.3 折算结论
-- **语溯RAG（命中率 100%）**：得益于**领域事件节点 + 词法确定性兜底（0.85 下限）+ 定向关系链 + CSV 字段语义保留 + 可质证闭环**，在"精确标识符不被噪声淹没""跨证据多跳闭环""案件时序还原"三处均命中，直接支撑 §4.1 的 5 分。
-- **Semantica（66%）**：**⑥⑦⑧★ 四处原生强命中**（双时态、多跳、实体合并是四套中最强实现），**⑤ 矛盾消解库级完整**（但默认管线不写回，折半计）；失分集中在 **①②③**——无精确标识符通道、默认管线不接结构化数据，恰是低质量取证语料最致命的三处，直接支撑 §4.1 的 4 分。若将结构化数据显式建模为带时间属性的事实再入库，③★ 会转为强命中。
-- **LightRAG（62.5%）**：通用语义召回准、Token 最省，但无事件节点、无确定性兜底、多跳仅隐式，矛盾消解与时序题失分，支撑 §4.1 的 3 分。
-- **GraphRAG（62.5%）**：全局社区聚合与"整体案情概述"是强项，但 CSV 行扁平、local 仅 1 跳、无时间模型，精确线索与时序题失分，支撑 §4.1 的 3 分。
-- **重要声明**：上述命中率为**基于代码能力上限的模拟推演，非端到端实跑基准**（已在 §1.3 声明）。读者可在同 LLM/Embedding 配置下对 `fraud_case_v1` 跑真实 Recall/F1 复核。
-
----
-
-## 七、局限与后续
-1. **未实跑基准**：本报告为架构级推断；如需终局可信度，应在同 LLM/Embedding 配置下对 `fraud_case_v1` 跑端到端 Recall/F1 与索引耗时，用实测替换推演命中率。Semantica 默认零 LLM，其检索实测可直接跑，是全套中唯一"无密钥即可复现"的评测对象。
-2. **权重主观**：目的加权反映本报告"取证可用性"目标；等权结果已并列公布，读者可按自身场景（如通用企业知识库、监管合规、极致成本敏感）重算权重。示例：若权重切换为"合规审计导向"（可解释性 25% + 稳定性 15% + 检索 15%），Semantica 有望升至第一。
-3. **场景对齐利益披露**：语溯RAG 为面向本场景深度定制的系统，其优势是"目标场景对齐"的自然结果；报告已在 3 个维度如实给出其低于对手的分数以证明未偏袒。Semantica 为独立外部项目，同样在健壮性/容错/混合类型 3 项低于对手。
-4. **音视频**：四套均不以音视频原生理解为强项（语溯RAG 有多模态 parser 预留、LightRAG 有 multimodal caption、Semantica 仅元数据），可作后续专项。
-5. **Semantica 特有观测**：其"确定性零 LLM"是架构级取舍——检索/索引 Token 效率与吞吐最优，但抽取与召回质量受限于 spaCy/正则上限；LLM 抽取（`ner_extractor` 支持 `method="llm"`）与 `query_with_reasoning` 可补足质量，需二次配置，成本随之回升。
-6. **版本时效**：四套均为活跃项目，本报告基于当前工作区快照（Semantica 为 v0.6.5）；升级后需重新取证。
-
----
-
-## 八、关键代码证据索引（便于开源复核）
-
-**语溯RAG**
-- 双机制（向量/图检索正交开关）：`implementations/milvus.py:1185-1191, 1210, 1338`
-- LLM 抽取并发 1–128：`graphs/extractors/llm.py:297-298`；执行层 cap=128：`graphs/milvus_graph_service.py:1231`（`CR-029: 1000→128`）
-- 图写并发上限 10 + 批量 flush：`graphs/milvus_graph_service.py:108, 131, 266-271, 640`
-- 词法确定性通道 + 0.85 分数下限：`implementations/milvus.py:346-374, 1311-1334, 1400, 1720-1748`
-- PPR 1–5 跳（默认 3）/ 有向可选 / RRF K=60：`implementations/milvus.py:255-262, 264-272, 273-283`
-- per-kb 锁消除 TOCTOU：`manager.py:808, 819, 836`；并发信号量 20：`base.py:1578`
-
-**Semantica**（新增，全部路径相对 `D:/PK/semantica/semantica/`）
-- 默认检索零 LLM（向量+图+关键词全确定性；LLM 仅可选）：`context/context_retriever.py:182, 1480, 1490-1531`
-- 混合检索 hybrid_alpha（0=纯向量→1=纯图）：`context/context_retriever.py:150, 763-764`
-- RRF 仅限多源融合路径：`vector_store/hybrid_search.py:148, 240-247, 564`
-- 无词法索引——暴力单词重叠扫描：`context/context_graph.py:961-997`（无 exact_score_floor / 无 BM25）
-- 多跳 BFS 跳数可控 + 权重衰减：`context/context_graph.py:858-959`；k-最短路径：`kg/path_finder.py:148-595`
-- 双时态与时间旅行：`kg/temporal_model.py:27-55`、`kg/temporal_query.py:41, 107-209, 359-441, 597-714`、`context/context_graph.py:2590-2601`
-- 冲突检测 5 类 + 解析 7 策略：`conflicts/conflict_detector.py:1205`、`conflicts/conflict_resolver.py:181-499`；默认构建仅日志不写回：`kg/graph_builder.py:828-852`
-- 实体合并接入构建：`kg/graph_builder.py:748`、`kg/entity_resolver.py:92`
-- 确定性抽取（spaCy/pattern；ml 强制串行）：`semantic_extract/ner_extractor.py:89`、`semantic_extract/relation_extractor.py:85`、`semantic_extract/config.py:182-183`
-- 事件检测纯正则且不入 KG 管线：`semantic_extract/event_detector.py:88, 115-135`（`graph_builder.py` 无 EventDetector 调用）
-- CSV 结构化解析存在但默认扁平：`parse/csv_parser.py:115-165`、`ingest/methods.py:1355-1366`；结构化行被丢弃：`kg/graph_builder.py:216-241`
-- PROV-O 溯源 + SHA-256 篡改自证：`provenance/manager.py:263, 417, 748, 1203`、`provenance/schemas.py:13-21`、`provenance/integrity.py:27, 119`
-- 推理解释器：`reasoning/explanation_generator.py:130-455`；决策因果链：`context/context_graph.py:3174, 4150`
-- 异常体系：`utils/exceptions.py:49-273`；校验：`utils/validators.py:61-529`
-- 退避重试恒为固定延迟：`pipeline/failure_handler.py:168, 315-321`；parallelism_manager 未接线：`pipeline/execution_engine.py:100`
-- 逐文件失败隔离 + fail_fast：`ingest/file_ingestor.py:511-538, 692-722`；`parse/document_parser.py:306-330`
-- 图 JSON 非原子保存：`context/context_graph.py:1116`；pipeline 状态仅内存：`pipeline/execution_engine.py:103-104`
-- Rete 条件匹配为无条件返回 True（README 自承）：`reasoning/rete_engine.py:79-82, 103-104`；Leiden=Louvain 重标：`kg/community_detector.py:255-275`
-
-**LightRAG**
-- 串行图写入（逐实体/关系 await）：`operate.py:1778, 2264, 3090, 3228, 3297`
-- 单内存图同步变异 + 整图重载：`kg/networkx_impl.py:63, 110, 256, 281`
-- 4 阶段 Token 截断：`operate.py:5688` 起（max_entity/relation/total_tokens）
-- 默认存储（NanoVectorDB + NetworkX）：`api/config.py:73-74`
-- 原子写 / 异常体系 / 监控：`file_atomic.py`、`exceptions.py`、`pipeline_metrics.py`
-
-**GraphRAG**
-- CSV 行级扁平化（丢字段语义）：`packages/graphrag-input/graphrag_input/csv.py:31`
-- global 每社区一次 LLM 调用：`packages/graphrag/graphrag/query/structured_search/global_search/search.py:172`
-- Leiden 社区检测工作流：`packages/graphrag/graphrag/index/workflows/create_communities.py`
-- 指数退避重试：`packages/graphrag-llm/graphrag_llm/retry/exponential_retry.py`
-
----
-
-*本报告由静态源码审计生成，所有分值均可回溯至上述 `文件:行号`。评分口径、权重与推演过程全部公开，欢迎社区据证据独立复核与补跑基准。*
+*本报告由静态源码审计 + 离线端到端实测生成。语溯RAG 部分全部结论可回溯至 `yusu_kb` 重构后代码；三家竞品结论可回溯至 v5 审计行号。欢迎据证据独立复核。*

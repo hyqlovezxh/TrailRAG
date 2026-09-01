@@ -113,6 +113,8 @@ class KnowledgeChunk(Base):
     ent_ids = Column(JSON_VALUE)
     tags = Column(JSON_VALUE)
     extraction_result = Column(JSON_VALUE)
+    # 文档类型（事件驱动双路径路由判据，构建与查询读同一份）
+    doc_type = Column(String(32))
     created_at = Column(DateTime, default=utc_now_naive)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 

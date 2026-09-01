@@ -109,14 +109,15 @@ class TestNlp:
 
 
 class TestPresets:
-    def test_default_preset_is_general(self):
-        assert DEFAULT_CHUNK_PRESET_ID == "general"
+    def test_default_preset_is_case_document(self):
+        # 事件驱动版默认预设为 case_document（案件文档自动检测分块）
+        assert DEFAULT_CHUNK_PRESET_ID == "case_document"
 
     def test_normalize_preset_id(self):
         assert normalize_chunk_preset_id("qa") == "qa"
-        assert normalize_chunk_preset_id("unknown_preset") == "general"
-        assert normalize_chunk_preset_id("") == "general"
-        assert normalize_chunk_preset_id(None) == "general"
+        assert normalize_chunk_preset_id("unknown_preset") == "case_document"
+        assert normalize_chunk_preset_id("") == "case_document"
+        assert normalize_chunk_preset_id(None) == "case_document"
 
     def test_resolve_processing_params_precedence(self):
         params = resolve_chunk_processing_params(

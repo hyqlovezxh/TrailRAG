@@ -61,6 +61,11 @@ class FakeChat:
             return gen()
         return GeneralResponse("".join(self.chunks))
 
+    async def call_collect(self, messages, **kwargs):
+        """Streaming collector contract: takes a messages list, returns one response."""
+        del kwargs
+        return await self.call(messages, stream=False)
+
 
 GRAPH_PAYLOAD = {
     "entities": [
@@ -251,7 +256,7 @@ async def client(tmp_path, monkeypatch, fake_chat):
     eval_chat = EvalFakeChat()
     eval_service = EvaluationService(select_model_fn=lambda model_spec: eval_chat, kb_manager=manager)
     app.dependency_overrides[deps.get_evaluation_service] = lambda: eval_service
-    set_default_graph_chat_model_fn(fake_chat.call)
+    set_default_graph_chat_model_fn(fake_chat.call_collect)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         yield client, manager

@@ -119,12 +119,12 @@ class OpenAIChatAdapter:
             logger.error(err)
             raise ChatModelError(err) from e
 
-    async def _stream_response(self, payload: dict[str, Any]):
+    async def _stream_response(self, payload: dict[str, Any], *, timeout: float | None = None):
         payload = dict(payload)
         payload["stream"] = True
         try:
             async with self._client() as client, client.stream(
-                "POST", self.base_url, json=payload, headers=self.headers
+                "POST", self.base_url, json=payload, headers=self.headers, timeout=timeout
             ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
@@ -153,11 +153,17 @@ class OpenAIChatAdapter:
             raise ChatModelError(err) from e
 
     async def call_collect(self, message, **model_kwargs) -> GeneralResponse:
-        """流式收集完整内容后返回单条响应（长生成不受非流式超时影响）。"""
+        """流式收集完整内容后返回单条响应（长生成不受非流式超时影响）。
+
+        ``timeout`` 从 model_kwargs 提取后交给 httpx（不进 JSON body）：
+        事件抽取提示长、输出 token 多，调用方需按场景放宽读超时。
+        """
         messages = self._normalize_messages(message)
+        timeout = model_kwargs.pop("timeout", None)
+        payload = {"model": self.model, "messages": messages, **model_kwargs}
         try:
             parts: list[str] = []
-            async for chunk in self._stream_response({"model": self.model, "messages": messages, **model_kwargs}):
+            async for chunk in self._stream_response(payload, timeout=timeout):
                 if chunk.content:
                     parts.append(chunk.content)
             return GeneralResponse("".join(parts))

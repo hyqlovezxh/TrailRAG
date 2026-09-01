@@ -73,11 +73,18 @@ graph TB
         GE --> GS[(事件图谱<br/>PPR 1-5 跳)]
     end
     Q[检索层<br/>向量 + 关键词 + 图 + 词法]
+    subgraph FB["检索时动态构图（回退）"]
+        direction LR
+        FB1[向量命中为种子] --> FB2[隐式图<br/>SIM/ADJACENT/LEXICAL/EXACT_ID]
+        FB2 --> FB3[PPR 隐式多跳<br/>图谱未建完时激活]
+    end
     F[RRF 融合 + 重排]
     O[证据链输出<br/>带来源 + 时序]
     IN --> B --> DUAL
     VS --> Q
     GS --> Q
+    Q -. 图谱未建完 .-> FB
+    FB --> Q
     Q --> F --> O
 ```
 
@@ -87,7 +94,7 @@ graph TB
 
 1. **双机制索引** —— 分块一完成向量化即可检索（向量直用），图增强同时并行构建证据图；不必等全图建完才能首次查询。
 2. **事件节点图谱** —— 图节点是"事件"而非仅关键词/实体，使跨源、按时间顺序的推理更自然。
-3. **多跳检索** —— 在事件图上做个性化 PageRank（1–5 跳，默认 3，依赖 scipy 稀疏求解），并显式枚举关系链以闭合证据。
+3. **双模态多跳检索** —— 图谱已建成时走事件图 PPR（1–5 跳，默认 3，依赖 scipy 稀疏求解）并显式枚举关系链以闭合证据；**图谱尚未建完时**自动回退到 BM25+向量形式，以向量命中分块为种子在检索时**动态构建隐式图**（SIM 互近邻 / ADJACENT 相邻 / LEXICAL 词项 / EXACT_ID 精确标识符四类边）并用 PPR 完成多跳扩散，跳转到语义最关联的远端分块——即"检索时动态构建知识图谱"，冷启动零成本。
 4. **词法确定性通道** —— 对手机号/身份证/案件编号等做精确匹配，设 `0.85` 相似度下限，让确定性线索不被语义噪声吞没。
 5. **低质量数据可用** —— 保留 CSV 字段语义、以事件锚定、显式呈现矛盾陈述，而非臆造单一答案。
 6. **时序重建** —— 从带时间的事件中还原全案"某人某时干了某事"。
@@ -163,6 +170,18 @@ flowchart TB
 语溯RAG 已与 Semantica、LightRAG、Microsoft GraphRAG 在源码层逐行对比，覆盖 9 个维度（检索准确度、入库索引速度、代码健壮性、稳定性、多跳推理、Token 效率、混合数据适配、可解释性、错误容忍度），以及面向低质量数据的"证据挖掘专项"。
 
 📊 **完整报告：** [RAG四套知识库权威对比分析报告（语溯RAG vs Semantica vs LightRAG vs GraphRAG）](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
+
+**检索时动态构图（隐式图 PPR 多跳）标定 —— 模拟数据-待补充**
+
+在确定性合成多跳语料（银行卡号硬连跨簇分块，纯向量基线无法触及 gold）上网格标定 `sim_threshold × knn_k × damping` 全 27 组配置，全部达标（零 LLM、零网络、可复跑，脚本见 `scripts/bench_implicit_graph.py`）：
+
+| 指标 | 结果 | 验收门槛 |
+|---|---|---|
+| 多跳召回增益 MultiHop-Hit@10 | **+100pp**（基线 0.000 → 1.000） | ≥ +12pp |
+| Hubness Index（高维 hubness 抑制） | **0.010–0.011** | < 0.05 |
+| p95 延迟增量 | **11.9–13.4 ms** | ≤ 60 ms |
+| 新增分块率 NewChunkRate | **≈0.48** | ≥ 0.15 |
+| 全量构建（N=6000 节点） | **387 ms** | < 400 ms 预算 |
 
 **目的加权总评（取证/低质量场景）**
 
@@ -393,7 +412,7 @@ Most traditional knowledge bases are built for **clean, high-quality enterprise 
 
 1. **Dual-engine indexing** — chunks become searchable the moment they are embedded (vector-direct), while graph augmentation builds the evidence graph in parallel; no need to wait for the full graph before the first query.
 2. **Event-node graph** — graph nodes are *events* (not just keywords/entities), making cross-source, time-ordered reasoning natural.
-3. **Multi-hop retrieval** — Personalized PageRank over the event graph (1–5 hops, default 3) plus explicit relation-chain enumeration for closed evidence.
+3. **Dual-mode multi-hop retrieval** — when the graph is fully built, Personalized PageRank over the event graph (1–5 hops, default 3) with explicit relation-chain enumeration; **when the graph is not yet built**, it falls back to BM25+vector and, using the vector hits as seeds, **dynamically constructs an implicit graph at query time** (SIM mutual-KNN / ADJACENT / LEXICAL / EXACT_ID edges) and runs PPR multi-hop expansion to reach the semantically closest distant chunk — i.e. "building the knowledge graph at query time", at zero cold-start cost.
 4. **Lexical deterministic channel** — exact identifier matching (phone / ID / case number) with a `0.85` similarity floor, so deterministic clues survive semantic noise.
 5. **Usable under low-quality data** — preserves CSV field semantics, anchors on events, and surfaces conflicting statements rather than hallucinating a single answer.
 6. **Timeline reconstruction** — recovers "who did what, when" across the whole case from time-bearing events.
@@ -429,6 +448,8 @@ TrailRAG has been compared, line-by-line at the source-code level, against Light
 📊 **Full report:** [RAG四套知识库权威对比分析报告（语溯RAG vs Semantica vs LightRAG vs GraphRAG）](./RAG四套知识库权威对比分析报告_语溯vsSemantica vsLightRAGvsGraphRAG.md)
 
 Headline (purpose-weighted, evidentiary/low-quality scenario): **TrailRAG 94.4% · LightRAG 80.2% · GraphRAG 67.4%**. On the same benchmark set, end-to-end evaluation scored **TrailRAG 100% answer accuracy** (500/500, recall @5/@10 = 1.000); LightRAG and GraphRAG measured **88% and 92%** respectively.
+
+**Implicit-graph (query-time dynamic graph construction) calibration — simulated data, to be replaced:** grid search over `sim_threshold × knn_k × damping` on a deterministic synthetic multi-hop corpus (all 27 configs passed, zero LLM, zero network, reproducible via `scripts/bench_implicit_graph.py`): MultiHop-Hit@10 **+100pp** (baseline 0.000 → 1.000, gate ≥ +12pp), Hubness Index **0.010–0.011** (gate < 0.05), p95 latency delta **11.9–13.4 ms** (gate ≤ 60 ms), NewChunkRate **≈0.48** (gate ≥ 0.15), full-build N=6000 **387 ms** (budget < 400 ms).
 
 ### License & Acknowledgements
 

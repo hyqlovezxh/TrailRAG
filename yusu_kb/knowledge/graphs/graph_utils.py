@@ -296,3 +296,120 @@ def _merge_placeholder_entities(
             rel["source"] = placeholder_redirect[rel["source"]]
         if rel["target"] in placeholder_redirect:
             rel["target"] = placeholder_redirect[rel["target"]]
+
+
+# ─── 事件路径锚点身份规范化（L1 修复：锚点必须是真实世界指称的规范函数）───
+# 根因：参考实现把 LLM 每次自由输出的 entity_type 直接塞进 compute_entity_id
+# 的哈希，同一实体在不同事件被标不同类型 → 分裂为多个锚点 → 事件间隐式边
+# （共享锚点）全部断裂 → 图退化为二度"哑铃"。
+#
+# Tier-A（纯函数，worker 内并行）在此完成：label 标点归一（N9：事件枚举用
+# 间隔号 ·、实体 schema 用斜杠 /，必须统一才能跨路径合图）+ 名称规范化 +
+# 实体 label 同义归一 + 标识符正则定型。产出 (canonical_name, tier_a_label)。
+
+# 标识符正则定型：命中即强制为对应类型（L3 兜底锚点与 participants 正则校验共用）。
+# 顺序即优先级：手机号 → 银行账户 → 车牌 → 单号 → 其他。
+_IDENTIFIER_LABEL_RULES: tuple[tuple[str, str], ...] = (
+    (r"^1[3-9]\d{9}$", "手机号"),
+    (r"^\d{16,19}$", "银行账户"),
+    (r"^[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z](?:[·・]?[A-Z0-9]){5,6}$", "车牌"),
+    (r"^[A-Z]{2,}\d{3,}", "单号"),
+)
+
+# 锚点 label 类型优先级（Tier-B 裁决）：值越小越优先。
+# 人物 0 > 组织机构 1 > 地点 2 > 资金·账户/银行账户/手机号/车牌/单号 3 > 通讯·账号 4 > 其他 9。
+LABEL_PRIORITY: dict[str, int] = {
+    "人物": 0,
+    "组织机构": 1,
+    "地点": 2,
+    "资金·账户": 3,
+    "银行账户": 3,
+    "手机号": 3,
+    "车牌": 3,
+    "单号": 3,
+    "通讯·账号": 4,
+    "其他": 9,
+    "Entity": 9,
+}
+
+
+def normalize_label_form(label: str | None) -> str:
+    """统一锚点/实体 label 的标点形式（N9 修复：间隔号/斜杠/空白）。
+
+    产出稳定形态：`资金·账户` / `通讯·账号`（保留间隔号）——LABEL_PRIORITY
+    与 _ENTITY_LABEL_CANONICAL 均按该形态登记。
+    """
+    if not label:
+        return "其他"
+    label = label.strip()
+    if not label:
+        return "其他"
+    # 斜杠系 → 间隔号系：资金/账户 → 资金·账户，通讯/账号 → 通讯·账号
+    if "/" in label or "／" in label:
+        parts = [p for p in re.split(r"[/／]", label) if p.strip()]
+        label = "·".join(parts)
+    # 多余空白压缩
+    label = " ".join(label.split())
+    return label or "其他"
+
+
+def _entity_label_canonical(label: str) -> str:
+    """实体 label 同义归一（电话/手机/号码→手机号，账号/银行卡→银行账户）。"""
+    return _ENTITY_LABEL_CANONICAL.get(label, label)
+
+
+def canonical_anchor_name(name: str) -> str:
+    """锚点名规范化：与实体路径完全一致的 normalize_entity_name(case_sensitive=False)。
+
+    参考实现硬编码 case_sensitive=True，导致含拉丁字符的名称（W01 / FB2026-0001）
+    在事件路径与实体路径算出不同 entity_id，跨路径永远不合图（R2）。
+    """
+    return normalize_entity_name(name, case_sensitive=False)
+
+
+def canonical_anchor_label(entity_type: str | None, *, name: str = "") -> str:
+    """锚点 label 规范化：标点统一 + 同义归一 + 标识符正则定型。
+
+    - 无类型或未知类型 → 其他/Entity（保留原语义）；
+    - 名称本身命中标识符规则（如 participants 把手机号当名字标"其他"）→ 强制定型；
+    - 其余走标点统一 + 实体 label 同义归一。
+    """
+    label = normalize_label_form(entity_type)
+    label = _entity_label_canonical(label)
+    if label in ("其他", "Entity"):
+        # 标识符规则基于原文（大小写敏感：车牌/单号含大写字母），
+        # canonical_anchor_name 会小写化，不能用于正则匹配。
+        original = name or ""
+        stripped = original.strip()
+        for pattern, fixed_label in _IDENTIFIER_LABEL_RULES:
+            if re.match(pattern, stripped):
+                return fixed_label
+    return label
+
+
+# 叙事/结构化文档类型的路由（chunk 级）：参考实现把 book/laws/qa/general 全路由
+# 到 event，法条/知识陈述天然无参与者 → 100% 产出度 0 孤儿（R3）。本表修正：
+# - 笔录/聊天 → event（天然 n 元叙事，时间窗已提供锚）
+# - laws/qa/csv_table/spreadsheet → llm（价值在概念网络/结构化聚合，FR-2）
+# - general → event（笔录/纪要检测失败时的落点）
+# - book → 仅当 chunk 命中对话/时间标记才走 event，否则 llm（说明性章节无事件）
+# - 未知/缺失 → llm（反转参考实现的默认，实体路径是经过验证的基线）
+_EVENT_ROUTED_DOC_TYPES = frozenset({"transcript", "chat_record", "general"})
+# book 走 event 的启发式标记：对话（问：/说"）或时间戳
+_BOOK_EVENT_MARKERS = (re.compile(r"[问：:]|说[：“」]|答[:：]"), re.compile(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}"))
+
+
+def route_extractor_for_chunk(doc_type: str | None, content: str | None = "") -> str:
+    """按 chunk 的 doc_type（与文本启发式）路由抽取路径："event" 或 "llm"。
+
+    doc_type 缺失/未知 → "llm"（安全默认，实体路径为已验证基线）。
+    """
+    dtype = (doc_type or "").strip().lower()
+    if dtype in _EVENT_ROUTED_DOC_TYPES:
+        return "event"
+    if dtype == "book":
+        text = content or ""
+        if any(marker.search(text) for marker in _BOOK_EVENT_MARKERS):
+            return "event"
+        return "llm"
+    return "llm"

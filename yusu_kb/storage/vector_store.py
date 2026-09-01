@@ -11,14 +11,39 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import zlib
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 from nano_vectordb import NanoVectorDB
 
 from yusu_kb.utils.logger import logger
+
+# Fields that must never leak into snapshot metadata: heavy payloads (the
+# base64 vector blob) and nano-vectordb bookkeeping keys.
+_SNAPSHOT_DROP_FIELDS = frozenset(
+    {"vector", "__vector__", "__metrics__", "__id__", "__created_at__"}
+)
+
+
+@dataclass(frozen=True)
+class VectorSnapshot:
+    """Row-aligned, read-only snapshot of a flushed vector corpus.
+
+    ``ids``, ``matrix`` rows and ``metas`` correspond 1:1 by index. Rows are
+    L2-normalized by the store, so a plain dot product equals cosine similarity.
+
+    The matrix is a read-only view: the store always *replaces* (never mutates
+    in place) a cached snapshot, so a reference handed to a caller stays valid
+    even if the corpus is re-indexed while the caller is still ranking.
+    """
+
+    ids: list[str] = field(default_factory=list)
+    matrix: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.float32))
+    metas: list[dict[str, Any]] = field(default_factory=list)
 
 
 class VectorStore:
@@ -61,6 +86,9 @@ class VectorStore:
         self._client: NanoVectorDB | None = None
         self._pending: dict[str, dict[str, Any]] = {}
         self._flush_lock = asyncio.Lock()
+        # Lazily materialised row-aligned snapshot; invalidated on every
+        # mutation so callers never observe a half-updated corpus.
+        self._snapshot_cache: VectorSnapshot | None = None
 
     async def initialize(self) -> None:
         """Create/load the nano-vectordb client, resolving the dimension first."""
@@ -71,6 +99,7 @@ class VectorStore:
             if not dim:
                 raise ValueError("Embedding probe returned an empty vector; cannot resolve dimension")
         self._client = NanoVectorDB(int(dim), storage_file=self._client_file_name)
+        self._snapshot_cache = None
 
     async def upsert(self, data: dict[str, dict[str, Any]]) -> None:
         """Buffer documents (id -> record) for deferred embedding + flush."""
@@ -137,6 +166,7 @@ class VectorStore:
 
             for doc_id in doc_ids:
                 self._pending.pop(doc_id, None)
+            self._snapshot_cache = None
 
     async def query(
         self, query: str, top_k: int, query_embedding: list[float] | None = None
@@ -170,13 +200,71 @@ class VectorStore:
         client = self._require_client()
         await asyncio.to_thread(client.delete, list(ids))
         await asyncio.to_thread(client.save)
+        self._snapshot_cache = None
 
     async def drop(self) -> None:
         """Drop this store: remove the data file (pending buffer discarded)."""
         self._client = None
         self._pending.clear()
+        self._snapshot_cache = None
         if os.path.exists(self._client_file_name):
             os.remove(self._client_file_name)
+
+    def snapshot(self) -> VectorSnapshot | None:
+        """Row-aligned snapshot of the flushed corpus, or ``None`` when unusable.
+
+        Buffered (not yet flushed) upserts are invisible, matching :meth:`query`.
+        Returns ``None`` when the store is uninitialised, empty or its data file
+        cannot be decoded -- callers must treat that as "no vector evidence" and
+        degrade, never raise.
+
+        The result is cached until the next mutation. It is decoded from this
+        store's own JSON file (the same file :meth:`index_done_callback` writes),
+        which preserves the exact float32 values and keeps us off
+        ``nano-vectordb`` private internals.
+        """
+        if self._snapshot_cache is None:
+            self._snapshot_cache = self._decode_snapshot()
+        snap = self._snapshot_cache
+        if snap is None or not snap.ids:
+            return None
+        return snap
+
+    def _decode_snapshot(self) -> VectorSnapshot | None:
+        """Decode this store's own data file into a row-aligned snapshot.
+
+        File layout mirrors ``nano_vectordb.save``: ``embedding_dim``, a ``data``
+        list of rows (row *i* pairs with matrix row *i*) and a base64-encoded
+        float32 ``matrix``.
+        """
+        if not os.path.exists(self._client_file_name):
+            return None
+        try:
+            with open(self._client_file_name, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            rows = payload.get("data") or []
+            dim = int(payload.get("embedding_dim") or 0)
+            encoded = payload.get("matrix") or ""
+            if not rows or dim <= 0 or not encoded:
+                return VectorSnapshot()
+            matrix = np.frombuffer(base64.b64decode(encoded), dtype=np.float32)
+            if matrix.size != len(rows) * dim:
+                logger.warning(
+                    f"[{self.workspace}] {self.namespace} snapshot size mismatch: "
+                    f"matrix={matrix.size}, rows={len(rows)}, dim={dim}"
+                )
+                return None
+            matrix = matrix.reshape(len(rows), dim)
+            ids: list[str] = []
+            metas: list[dict[str, Any]] = []
+            for row in rows:
+                ids.append(str(row.get("__id__") or ""))
+                metas.append({k: v for k, v in row.items() if k not in _SNAPSHOT_DROP_FIELDS})
+            return VectorSnapshot(ids=ids, matrix=matrix, metas=metas)
+        except (OSError, ValueError, TypeError) as exc:
+            # 快照解码失败只影响隐式图回退通道，不阻断主检索，交由调用方降级
+            logger.warning(f"[{self.workspace}] {self.namespace} snapshot decode failed: {exc}")
+            return None
 
     def _require_client(self) -> NanoVectorDB:
         if self._client is None:

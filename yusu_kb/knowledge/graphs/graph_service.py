@@ -37,19 +37,33 @@ import asyncio
 from pathlib import Path
 from typing import Any, ClassVar
 
+from yusu_kb.knowledge.graphs.anchor_registry import (
+    AnchorRegistry,
+    build_anchor_candidate,
+)
+from yusu_kb.knowledge.graphs.connectivity import evaluate_gate
 from yusu_kb.knowledge.graphs.description_merger import DescriptionMerger
+from yusu_kb.knowledge.graphs.event_guards import verify_events
+from yusu_kb.knowledge.graphs.event_links import generate_file_event_links
+from yusu_kb.knowledge.graphs.event_schemas import EventRecord
 from yusu_kb.knowledge.graphs.extractors.base import (
     GraphExtractor,
     normalize_extraction_result,
+)
+from yusu_kb.knowledge.graphs.extractors.event import (
+    EventGraphExtractor,
+    normalize_event_result,
 )
 from yusu_kb.knowledge.graphs.extractors.llm import LLMGraphExtractor
 from yusu_kb.knowledge.graphs.graph_storage import NetworkXGraphStorage
 from yusu_kb.knowledge.graphs.graph_utils import (
     DESC_SEPARATOR,
     build_graph_payload,
+    canonical_anchor_name,
     compute_entity_id,
     compute_triple_id,
     normalize_entity_name,
+    route_extractor_for_chunk,
 )
 from yusu_kb.knowledge.graphs.graph_vector_store import GraphVectorStore
 from yusu_kb.knowledge.graphs.token_utils import count_tokens
@@ -61,6 +75,22 @@ from yusu_kb.utils.datetime_utils import utc_isoformat
 from yusu_kb.utils.logger import logger
 
 GRAPH_CONFIG_KEY = "graph_build_config"
+
+
+def _detect_document_type_safe(document_title: str, content: str) -> str:
+    """构建期 doc_type 探测（懒加载 case_document，缺失时安全回退 general）。
+
+    S3 移植前该模块不存在，回退 general 保构建不崩；S3 落地后走完整检测。
+    """
+    try:
+        from yusu_kb.knowledge.chunking.parsers.case_document import (
+            _detect_document_type,
+        )
+
+        return _detect_document_type(document_title, content) or "general"
+    except Exception as exc:  # noqa: BLE001 - 探测失败不得阻塞构建
+        logger.warning(f"doc_type detection failed (fallback to general): {exc}")
+        return "general"
 
 
 def _split_description(desc: str) -> list[str]:
@@ -105,7 +135,15 @@ def _triple_content(
 class _PendingGraphWrite:
     """One chunk's prepared records waiting in the flusher queue."""
 
-    __slots__ = ("chunk", "content_preview", "entity_records", "triple_records")
+    __slots__ = (
+        "anchor_candidates",
+        "chunk",
+        "content_preview",
+        "entity_records",
+        "event_records",
+        "fallback_by_event",
+        "triple_records",
+    )
 
     def __init__(
         self,
@@ -114,11 +152,17 @@ class _PendingGraphWrite:
         entity_records: list[dict[str, Any]],
         triple_records: list[dict[str, Any]],
         content_preview: str,
+        event_records: list[EventRecord] | None = None,
+        anchor_candidates: list[dict[str, str]] | None = None,
+        fallback_by_event: dict[str, list[dict[str, str]]] | None = None,
     ) -> None:
         self.chunk = chunk
         self.entity_records = entity_records
         self.triple_records = triple_records
         self.content_preview = content_preview
+        self.event_records = event_records or []
+        self.anchor_candidates = anchor_candidates or []
+        self.fallback_by_event = fallback_by_event or {}
 
 
 class _GraphBatchFlusher:
@@ -132,6 +176,7 @@ class _GraphBatchFlusher:
 
     FLUSH_ENTITY_THRESHOLD = 1000
     FLUSH_TRIPLE_THRESHOLD = 2000
+    FLUSH_EVENT_THRESHOLD = 1000
     FLUSH_CHUNK_THRESHOLD = 20
     FLUSH_TIMEOUT = 5.0
 
@@ -145,6 +190,7 @@ class _GraphBatchFlusher:
         self._pending: list[_PendingGraphWrite] = []
         self._entity_count = 0
         self._triple_count = 0
+        self._event_count = 0
         self._processed = 0
         self._failed = 0
         self._failed_chunk_ids: set[str] = set()
@@ -172,6 +218,7 @@ class _GraphBatchFlusher:
             self._pending.append(item)
             self._entity_count += len(item.entity_records)
             self._triple_count += len(item.triple_records)
+            self._event_count += len(item.event_records)
             if self._should_flush():
                 await self._flush_batch_safe()
 
@@ -179,6 +226,7 @@ class _GraphBatchFlusher:
         return (
             self._entity_count >= self.FLUSH_ENTITY_THRESHOLD
             or self._triple_count >= self.FLUSH_TRIPLE_THRESHOLD
+            or self._event_count >= self.FLUSH_EVENT_THRESHOLD
             or len(self._pending) >= self.FLUSH_CHUNK_THRESHOLD
         )
 
@@ -190,6 +238,7 @@ class _GraphBatchFlusher:
         self._pending.clear()
         self._entity_count = 0
         self._triple_count = 0
+        self._event_count = 0
         try:
             succeeded_items, failed_chunk_ids = await self._service._flush_graph_batch(
                 self._kb_id, batch
@@ -347,9 +396,10 @@ class GraphService:
         """
         normalized_type = (extractor_type or "").lower()
         options = {**self.default_extractor_options, **(extractor_options or {})}
-        if normalized_type != "llm":
-            raise ValueError(f"未知的图谱抽取器类型: {normalized_type}（当前仅支持 llm）")
-        self._validate_llm_options(options)
+        if normalized_type not in ("llm", "event"):
+            raise ValueError(f"未知的图谱抽取器类型: {normalized_type}（仅支持 llm / event）")
+        # 事件抽取器无 schema/gleaning 语义，校验项不同；两者都要求 model_spec
+        self._validate_extractor_options(normalized_type, options)
 
         lock = self._get_lock(kb_id)
         merge_state: dict[str, Any] = {}
@@ -401,26 +451,33 @@ class GraphService:
         return merge_state["config"]
 
     @staticmethod
-    def _validate_llm_options(options: dict[str, Any]) -> None:
-        """Configure-time validation: the fields that shape extraction output."""
+    def _validate_extractor_options(extractor_type: str, options: dict[str, Any]) -> None:
+        """Configure-time validation：按抽取器类型分派（llm 有 schema/gleaning）。"""
         if not (options.get("model_spec") or "").strip():
-            raise ValueError("LLM 图谱抽取器需要 model_spec")
-        if options.get("prompt"):
-            raise ValueError("LLM 图谱抽取器不支持自定义完整 Prompt，请使用 schema 配置抽取约束")
+            raise ValueError("图谱抽取器需要 model_spec")
+        if extractor_type == "event":
+            if options.get("prompt"):
+                raise ValueError("事件抽取器不支持自定义完整 Prompt，请使用 event_type 枚举约束")
+            if options.get("gleaning_count"):
+                raise ValueError("事件抽取器不支持 gleaning（事件粒度由 MAX_EVENTS_PER_CHUNK 控制）")
+        else:
+            if options.get("prompt"):
+                raise ValueError("LLM 图谱抽取器不支持自定义完整 Prompt，请使用 schema 配置抽取约束")
         try:
             concurrency_count = int(options.get("concurrency_count") or 8)
         except (TypeError, ValueError) as exc:
-            raise ValueError("LLM 抽取器 concurrency_count 必须是整数") from exc
+            raise ValueError("图谱抽取器 concurrency_count 必须是整数") from exc
         if concurrency_count < 1 or concurrency_count > 128:
-            raise ValueError("LLM 抽取器 concurrency_count 必须在 1 到 128 之间（与执行层 cap 一致）")
+            raise ValueError("图谱抽取器 concurrency_count 必须在 1 到 128 之间（与执行层 cap 一致）")
         if options.get("model_params") is not None and not isinstance(options["model_params"], dict):
-            raise ValueError("LLM 抽取器 model_params 必须是对象")
-        try:
-            gleaning_count = int(options.get("gleaning_count") or 0)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("LLM 抽取器 gleaning_count 必须是整数") from exc
-        if gleaning_count < 0 or gleaning_count > 3:
-            raise ValueError("LLM 抽取器 gleaning_count 必须在 0 到 3 之间")
+            raise ValueError("图谱抽取器 model_params 必须是对象")
+        if extractor_type != "event":
+            try:
+                gleaning_count = int(options.get("gleaning_count") or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("LLM 抽取器 gleaning_count 必须是整数") from exc
+            if gleaning_count < 0 or gleaning_count > 3:
+                raise ValueError("LLM 抽取器 gleaning_count 必须在 0 到 3 之间")
 
     @staticmethod
     def _get_locked_config(additional_params: dict[str, Any]) -> dict[str, Any]:
@@ -454,7 +511,9 @@ class GraphService:
 
     @staticmethod
     def _get_worker_count(config: dict[str, Any]) -> int:
-        if (config.get("extractor_type") or "").lower() != "llm":
+        # llm 与 event 同为 LLM 驱动抽取，共享并发语义（参考实现 event 返回 1
+        # 的串行化缺陷在此修正：event 抽取同样是 LLM 调用，须吃满 concurrency）。
+        if (config.get("extractor_type") or "").lower() not in ("llm", "event"):
             return 1
         try:
             worker_count = int((config.get("extractor_options") or {}).get("concurrency_count") or 8)
@@ -558,7 +617,10 @@ class GraphService:
         state: dict[str, Any],
     ) -> dict[str, Any]:
         """Run supply/worker/flusher to completion, then post-process."""
-        extractor = self._create_extractor(config["extractor_type"], self._runtime_extractor_options(config))
+        extractor_type = (config.get("extractor_type") or "llm").lower()
+        # 基础抽取器恒为 llm（承载结构化文档 + 未启用事件 KB 的叙事文档）
+        extractor = self._create_extractor("llm", self._runtime_extractor_options(config))
+        event_extractor: EventGraphExtractor | None = None
         worker_count = self._get_worker_count(config)
         description_merger = self._create_description_merger(config)
 
@@ -567,6 +629,7 @@ class GraphService:
         enqueued_chunk_ids: set[str] = set()
         in_flight_chunk_ids: set[str] = set()
         extraction_done = 0
+        touched_file_ids: set[str] = set()
 
         flusher = _GraphBatchFlusher(
             service=self,
@@ -612,25 +675,58 @@ class GraphService:
                 await work_queue.put(None)
 
         async def worker() -> None:
-            nonlocal extraction_done, failed
+            nonlocal extraction_done, failed, touched_file_ids, event_extractor
+            file_doc_types: dict[str, str] = {}
             while True:
                 item = await work_queue.get()
                 if item is None:  # sentinel: no more chunks, exit
                     return
                 chunk, document_title = item
                 try:
+                    # 双路径路由：chunk 级判据（doc_type 优先取入库字段，缺失则
+                    # 构建期探测并缓存到文件级），与查询侧读同一份判据。
+                    doc_type = str(getattr(chunk, "doc_type", "") or "")
+                    if not doc_type:
+                        doc_type = file_doc_types.get(chunk.file_id) or ""
+                    if not doc_type:
+                        doc_type = _detect_document_type_safe(document_title, chunk.content or "")
+                        file_doc_types[chunk.file_id] = doc_type
+                    use_event_path = (
+                        extractor_type == "event"
+                        and route_extractor_for_chunk(doc_type, chunk.content or "") == "event"
+                    )
+                    if use_event_path and event_extractor is None:
+                        event_options = dict(self._runtime_extractor_options(config))
+                        event_extractor = self._create_extractor("event", event_options)
+                    active_extractor = event_extractor if use_event_path else extractor
+                    touched_file_ids.add(chunk.file_id)
+
                     extraction_result = await self._get_chunk_extraction_result(
-                        kb_id, chunk, extractor, document_title=document_title
+                        kb_id, chunk, active_extractor, document_title=document_title
                     )
-                    prepared = self._prepare_chunk_graph_records(kb_id, chunk, extraction_result)
-                    await flusher.enqueue(
-                        _PendingGraphWrite(
-                            chunk=chunk,
-                            entity_records=prepared["entity_records"],
-                            triple_records=prepared["triple_records"],
-                            content_preview=prepared["content_preview"],
+                    if use_event_path:
+                        prepared = self._prepare_chunk_event_records(kb_id, chunk, extraction_result)
+                        await flusher.enqueue(
+                            _PendingGraphWrite(
+                                chunk=chunk,
+                                entity_records=[],
+                                triple_records=[],
+                                content_preview=prepared["content_preview"],
+                                event_records=prepared["event_records"],
+                                anchor_candidates=prepared["anchor_candidates"],
+                                fallback_by_event=prepared["fallback_by_event"],
+                            )
                         )
-                    )
+                    else:
+                        prepared = self._prepare_chunk_graph_records(kb_id, chunk, extraction_result)
+                        await flusher.enqueue(
+                            _PendingGraphWrite(
+                                chunk=chunk,
+                                entity_records=prepared["entity_records"],
+                                triple_records=prepared["triple_records"],
+                                content_preview=prepared["content_preview"],
+                            )
+                        )
                     enqueued_chunk_ids.add(chunk.chunk_id)
                     in_flight_chunk_ids.discard(chunk.chunk_id)
                     extraction_done += 1
@@ -638,7 +734,7 @@ class GraphService:
                     failed_chunk_ids.add(chunk.chunk_id)
                     in_flight_chunk_ids.discard(chunk.chunk_id)
                     failed += 1
-                    logger.error(f"Chunk 图谱构建失败 chunk_id={chunk.chunk_id}: {exc}")
+                    logger.error(f"Chunk 图谱构建失败 chunk_id={chunk.chunk_id}: {exc}", exc_info=True)
                 finally:
                     completed = extraction_done + failed
                     state["progress"] = 5.0 + min(90.0, completed / max(total_pending, 1) * 90.0)
@@ -688,6 +784,27 @@ class GraphService:
                         logger.info(f"[Post-process] Cross-chunk description merged for kb {kb_id}: {merged_count}")
                 except Exception as exc:  # noqa: BLE001 - 后处理单项失败不阻塞整体完成
                     logger.error(f"[Post-process] Cross-chunk description merge failed for kb {kb_id}: {exc}")
+            # L4 确定性事件-事件边（文件内，touched 文件重算；增量构建只动受影响文件）
+            if extractor_type == "event" and touched_file_ids:
+                try:
+                    total_links = 0
+                    for fid in sorted(touched_file_ids):
+                        total_links += generate_file_event_links(storage, fid)
+                    if total_links > 0:
+                        logger.info(f"[Post-process] Generated {total_links} event-event links for kb {kb_id}")
+                except Exception as exc:  # noqa: BLE001 - L4 边失败不阻塞构建完成
+                    logger.error(f"[Post-process] Event link generation failed for kb {kb_id}: {exc}")
+            try:
+                connectivity = storage.get_connectivity()
+                gate_passed, gate_failures = evaluate_gate(connectivity)
+                state["connectivity"] = connectivity
+                state["gate"] = {"passed": gate_passed, "failures": gate_failures}
+                if gate_passed:
+                    logger.info(f"[Post-process] 连通性门禁通过: {connectivity}")
+                else:
+                    logger.warning(f"[Post-process] 连通性门禁未通过: {gate_failures}")
+            except Exception as exc:  # noqa: BLE001 - 门禁计算失败不阻塞构建完成
+                logger.error(f"[Post-process] Connectivity gate failed for kb {kb_id}: {exc}")
             storage.save()
             logger.info(f"[Post-process] Full post-processing complete for kb {kb_id}")
 
@@ -702,10 +819,14 @@ class GraphService:
 
     def _create_extractor(self, extractor_type: str, options: dict[str, Any]) -> GraphExtractor:
         options = dict(options)
-        if extractor_type != "llm":
-            raise ValueError(f"未知的图谱抽取器类型: {extractor_type}（当前仅支持 llm）")
+        normalized_type = (extractor_type or "").lower()
+        if normalized_type not in ("llm", "event"):
+            raise ValueError(f"未知的图谱抽取器类型: {extractor_type}（仅支持 llm / event）")
+        if normalized_type == "event":
+            # 事件抽取器不支持 gleaning（粒度由 MAX_EVENTS_PER_CHUNK 控制）
+            options.pop("gleaning_count", None)
         options.setdefault("chat_model_fn", self.chat_model_fn)
-        extractor = LLMGraphExtractor(options)
+        extractor = EventGraphExtractor(options) if normalized_type == "event" else LLMGraphExtractor(options)
         extractor.validate_options()
         return extractor
 
@@ -718,6 +839,13 @@ class GraphService:
             return None
         return DescriptionMerger(model_spec=model_spec, chat_model_fn=self.chat_model_fn)
 
+    def _anchor_registry(self, kb_id: str) -> AnchorRegistry:
+        """KB 级锚点裁决器（挂 storage 上，随图生命周期重建/丢弃）。"""
+        storage = self.get_storage(kb_id)
+        if getattr(storage, "anchor_registry", None) is None:
+            storage.anchor_registry = AnchorRegistry.from_storage(kb_id, storage)
+        return storage.anchor_registry
+
     async def _get_chunk_extraction_result(
         self,
         kb_id: str,
@@ -726,13 +854,20 @@ class GraphService:
         *,
         document_title: str = "",
     ) -> dict[str, Any]:
-        """Reuse the cached extraction when it still normalizes non-empty."""
+        """Reuse the cached extraction when it still normalizes non-empty.
+
+        缓存带类型信封（隔离事件/实体两种形状，杜绝源项目 KeyError 隐患）：
+        {"__yusu_extract__": 1, "extractor_type": ..., "payload": {...}}；
+        无信封 → legacy llm 形状；信封类型与当前抽取器不符 → 强制重抽。
+        """
         extractor_type = extractor.extractor_type
         if chunk.extraction_result:
-            cached = normalize_extraction_result(chunk.extraction_result, extractor_type)
-            if cached.get("entities") or cached.get("relations"):
-                return cached
-            logger.warning(f"Chunk {chunk.chunk_id} has empty cached extraction_result, re-extracting")
+            cached_raw = self._unwrap_extraction_cache(chunk.extraction_result, extractor_type)
+            if cached_raw is not None:
+                cached = self._normalize_by_extractor(cached_raw, chunk.chunk_id, extractor_type)
+                if self._normalized_non_empty(cached, extractor_type):
+                    return cached
+                logger.warning(f"Chunk {chunk.chunk_id} has empty cached extraction_result, re-extracting")
 
         extraction_result = await extractor.extract(
             chunk.content,
@@ -744,14 +879,47 @@ class GraphService:
                 "document_title": document_title,
             },
         )
-        normalized_result = normalize_extraction_result(extraction_result, extractor_type)
+        normalized_result = self._normalize_by_extractor(extraction_result, chunk.chunk_id, extractor_type)
         # Empty results are not cached so later builds retry instead of
         # reusing a permanently empty extraction.
-        if not normalized_result.get("entities") and not normalized_result.get("relations"):
+        if not self._normalized_non_empty(normalized_result, extractor_type):
             logger.warning(f"LLM returned empty extraction for chunk {chunk.chunk_id}, skipping cache")
             return normalized_result
-        await self.chunk_repo.update_extraction_result(chunk.chunk_id, normalized_result)
+        envelope = {
+            "__yusu_extract__": 1,
+            "extractor_type": extractor_type,
+            "schema_version": 1,
+            "payload": extraction_result,
+        }
+        await self.chunk_repo.update_extraction_result(chunk.chunk_id, envelope)
         return normalized_result
+
+    @staticmethod
+    def _unwrap_extraction_cache(raw: Any, extractor_type: str) -> dict[str, Any] | None:
+        """信封解析：类型不匹配返回 None（强制重抽），legacy 形状按 llm 处理。"""
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("__yusu_extract__") == 1:
+            if str(raw.get("extractor_type") or "") != extractor_type:
+                return None
+            payload = raw.get("payload")
+            return payload if isinstance(payload, dict) else None
+        # legacy 缓存：无信封，视为 llm 形状（兼容现有数据）
+        if extractor_type != "llm":
+            return None
+        return raw
+
+    def _normalize_by_extractor(self, result: dict[str, Any], chunk_id: str, extractor_type: str) -> dict[str, Any]:
+        """按抽取器类型分派归一化（事件 / 实体路径平行）。"""
+        if extractor_type == "event":
+            return normalize_event_result(result, chunk_id=chunk_id)
+        return normalize_extraction_result(result, extractor_type)
+
+    @staticmethod
+    def _normalized_non_empty(normalized: dict[str, Any], extractor_type: str) -> bool:
+        if extractor_type == "event":
+            return bool(normalized.get("events"))
+        return bool(normalized.get("entities") or normalized.get("relations"))
 
     def _prepare_chunk_graph_records(
         self, kb_id: str, chunk: Any, normalized_result: dict[str, Any]
@@ -825,6 +993,126 @@ class GraphService:
             "content_preview": (chunk.content or "")[:300],
         }
 
+    def _prepare_chunk_event_records(
+        self, kb_id: str, chunk: Any, normalized_result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """事件路径准备：G1 校验 + 锚点候选（Tier-A）产出。
+
+        event_id 由 normalize_event_result 统一生成（ev: 前缀，N1 修复）；
+        锚点只产出 (canonical_name, tier_a_label) 候选，entity_id 由 flusher 内
+        AnchorRegistry 裁决（Tier-B，零锁）。L3 兜底：零参与者事件从
+        exact_identifiers/location 派生类型化锚点（cap=2，source=fallback）。
+        """
+        records = [r for r in (normalized_result.get("events") or []) if isinstance(r, EventRecord)]
+        verify_events(records, chunk.content or "")
+        event_records: list[EventRecord] = []
+        anchor_candidates: list[dict[str, str]] = []
+        # 每个事件自己的 L3 fallback 候选（只绑定到该事件，不跨事件串锚点）
+        fallback_by_event: dict[str, list[dict[str, str]]] = {}
+
+        for record in records:
+            event_records.append(record)
+            for participant in record.participants:
+                candidate = build_anchor_candidate(participant.name, participant.entity_type)
+                if candidate:
+                    anchor_candidates.append(candidate)
+            # L3：participants 为空时从标识符/地点派生兜底锚点
+            if not record.participants:
+                fallback_by_event[record.event_id] = self._derive_fallback_anchors(record, cap=2)
+                anchor_candidates.extend(fallback_by_event[record.event_id])
+
+        return {
+            "event_records": event_records,
+            "anchor_candidates": anchor_candidates,
+            "fallback_by_event": fallback_by_event,
+            "content_preview": (chunk.content or "")[:300],
+        }
+
+    @staticmethod
+    def _derive_fallback_anchors(record: EventRecord, *, cap: int = 2) -> list[dict[str, str]]:
+        """L3 兜底锚点：无参与者事件的召回质量手段（非连通性手段）。
+
+        1) exact_identifiers 逐项正则定型（手机号/银行账户/车牌/单号）；
+        2) location（长度 ≤20 且不含句读）定型为"地点"；
+        3) objects 默认丢弃（"尾号6688的银行卡"类噪声），仅当命中标识符正则时采纳；
+        4) 仍为零 → 不造合成锚点（L2+L4 已保证事件度 ≥1）。
+        """
+        candidates: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for ident in record.exact_identifiers:
+            candidate = build_anchor_candidate(ident, None)
+            normalized = candidate.get("normalized_name")
+            if not candidate or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(candidate)
+            if len(candidates) >= cap:
+                return candidates
+        location = (record.location or "").strip()
+        if len(candidates) < cap and 1 <= len(location) <= 20 and not any(ch in location for ch in "。，,；;"):
+            candidate = build_anchor_candidate(location, "地点")
+            normalized = candidate.get("normalized_name")
+            if candidate and normalized not in seen:
+                seen.add(normalized)
+                candidates.append(candidate)
+        return candidates[:cap]
+
+    @staticmethod
+    def _serialize_event_row(record: EventRecord) -> dict[str, Any]:
+        """EventRecord → 存储行（time_norm 为 ISO 字符串、text_span 为 list）。"""
+        return {
+            "event_id": record.event_id,
+            "chunk_id": record.chunk_id,
+            "file_id": record.file_id,
+            "event_type": record.event_type.value,
+            "summary": record.summary,
+            "time_expr": record.time_expr,
+            "time_norm": record.time_norm.isoformat() if record.time_norm else None,
+            "time_resolution": record.time_resolution,
+            "location": record.location,
+            "action": record.action,
+            "participants": [p.name for p in record.participants],
+            "objects": list(record.objects),
+            "amount": record.amount,
+            "exact_identifiers": list(record.exact_identifiers),
+            "text_span": list(record.text_span) if record.text_span else None,
+            "verification": record.verification,
+            "value_weight": record.effective_value_weight,
+            "duplicate_of": record.duplicate_of,
+        }
+
+    @staticmethod
+    def _serialize_event_vector(record: EventRecord) -> dict[str, Any]:
+        """EventRecord → 事件向量记录（content 为 summary+n 元槽位拼接）。
+
+        time_norm 为 epoch 秒，缺失置 0（检索侧按 0 判缺失）。
+        """
+        slots: list[str] = []
+        if record.action:
+            slots.append(f"动作:{record.action}")
+        if record.time_expr:
+            slots.append(f"时间:{record.time_expr}")
+        if record.location:
+            slots.append(f"地点:{record.location}")
+        if record.amount is not None:
+            slots.append(f"金额:{record.amount}元")
+        if record.participants:
+            slots.append("参与者:" + "、".join(p.name for p in record.participants))
+        if record.objects:
+            slots.append("标的:" + "、".join(record.objects))
+        if record.exact_identifiers:
+            slots.append("编号:" + "、".join(record.exact_identifiers))
+        content = " | ".join([record.summary, *slots])
+        return {
+            "id": record.event_id,
+            "content": content,
+            "chunk_id": record.chunk_id,
+            "file_id": record.file_id,
+            "event_type": record.event_type.value,
+            "value_weight": record.effective_value_weight,
+            "time_norm": int(record.time_norm.timestamp()) if record.time_norm else 0,
+        }
+
     async def _flush_graph_batch(
         self, kb_id: str, batch: list[_PendingGraphWrite]
     ) -> tuple[list[_PendingGraphWrite], set[str]]:
@@ -832,16 +1120,48 @@ class GraphService:
 
         Per-chunk isolation for storage/repo writes; a vector-store failure
         fails the whole batch (chunks stay pending, retry is idempotent).
+
+        事件路径在此完成 Tier-B 锚点裁决（唯一写点，单协程零锁），并把锚点
+        并入 entity_records（只建节点与 MENTIONS，不进向量——N8）。
         """
         storage = self.get_storage(kb_id)
         entity_store = await self.get_vector_store(kb_id, "entity")
         triple_store = await self.get_vector_store(kb_id, "triple")
 
+        # —— 先裁决锚点（Tier-B），再执行单 chunk 持久化（幂等隔离）——
+        event_items = [item for item in batch if item.event_records]
+        anchor_by_name: dict[str, dict[str, Any]] = {}
+        if event_items:
+            registry = self._anchor_registry(kb_id)
+            all_candidates = [dict(cand) for item in event_items for cand in item.anchor_candidates]
+            resolved = registry.resolve_all(all_candidates, kb_id=kb_id)
+            anchor_by_name = {row["normalized_name"]: row for row in resolved}
+            for item in event_items:
+                # 锚点并入 item.entity_records：入库/建节点/被 MENTIONS 保住
+                existing_ids = {r["entity_id"] for r in item.entity_records}
+                for anchor in resolved:
+                    if anchor["entity_id"] not in existing_ids:
+                        item.entity_records.append(
+                            {
+                                "entity_id": anchor["entity_id"],
+                                "kb_id": kb_id,
+                                "normalized_name": anchor["normalized_name"],
+                                "label": anchor["label"],
+                                "name": anchor["name"],
+                                "attributes": [],
+                                "description": None,
+                                "content": _entity_content(
+                                    {"normalized_name": anchor["normalized_name"], "label": anchor["label"]}
+                                ),
+                            }
+                        )
+                        existing_ids.add(anchor["entity_id"])
+
         succeeded: list[_PendingGraphWrite] = []
         failed_chunk_ids: set[str] = set()
         for item in batch:
             try:
-                self._persist_chunk_graph(storage, item)
+                self._persist_chunk_graph(storage, item, anchor_by_name=anchor_by_name)
                 await self._persist_chunk_repo(kb_id, item)
                 succeeded.append(item)
             except Exception as exc:  # noqa: BLE001 - 单 chunk 失败隔离，不毒化同批其他 chunk
@@ -875,6 +1195,18 @@ class GraphService:
             ]
         )
 
+        # 事件向量（仅规范事件，G2 判重的不进向量）
+        if event_items:
+            event_store = await self.get_vector_store(kb_id, "event")
+            event_vector_records: list[dict[str, Any]] = []
+            for item in event_items:
+                for record in item.event_records:
+                    if record.duplicate_of is not None:
+                        continue
+                    event_vector_records.append(self._serialize_event_vector(record))
+            if event_vector_records:
+                await event_store.upsert(event_vector_records)
+
         for item in succeeded:
             try:
                 await self.chunk_repo.mark_graph_indexed(
@@ -892,7 +1224,13 @@ class GraphService:
         storage.save()
         return succeeded, failed_chunk_ids
 
-    def _persist_chunk_graph(self, storage: NetworkXGraphStorage, item: _PendingGraphWrite) -> None:
+    def _persist_chunk_graph(
+        self,
+        storage: NetworkXGraphStorage,
+        item: _PendingGraphWrite,
+        *,
+        anchor_by_name: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         """Merge one chunk's records into the in-memory graph (sync)."""
         chunk = item.chunk
         storage.add_chunk(
@@ -921,6 +1259,69 @@ class GraphService:
                 file_ids=[chunk.file_id],
                 description=record.get("description") or "",
             )
+        if item.event_records:
+            self._persist_chunk_events(storage, item, anchor_by_name=anchor_by_name)
+
+    def _persist_chunk_events(
+        self,
+        storage: NetworkXGraphStorage,
+        item: _PendingGraphWrite,
+        *,
+        anchor_by_name: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        """事件路径图写入：Event 节点 + CHUNK_EVENT 边（L2）+ EVENT_MENTIONS 边。
+
+        锚点实体已并入 item.entity_records（upsert_entity 已建节点）；此处只建
+        Event 节点与两条边。事件 id 已带 ev: 前缀（N1），与 chunk/entity 隔离。
+        """
+        chunk = item.chunk
+        anchor_by_name = anchor_by_name or {}
+        fallback_by_event = item.fallback_by_event or {}
+        for ordinal, record in enumerate(item.event_records):
+            row = self._serialize_event_row(record)
+            storage.upsert_event(
+                **row,
+                chunk_index=chunk.chunk_index,
+            )
+            storage.add_chunk_event(
+                event_id=record.event_id,
+                chunk_id=chunk.chunk_id,
+                file_id=chunk.file_id,
+                ordinal=ordinal,
+            )
+            # 事件 → 锚点绑定：participants 逐字名字优先；L3 fallback 只绑本事件的
+            bound: set[str] = set()
+            for participant in record.participants:
+                normalized = canonical_anchor_name(participant.name)
+                if not normalized or normalized in bound:
+                    continue
+                anchor = anchor_by_name.get(normalized)
+                if anchor is None:
+                    continue
+                bound.add(normalized)
+                storage.add_event_mention(
+                    event_id=record.event_id,
+                    chunk_id=chunk.chunk_id,
+                    file_id=chunk.file_id,
+                    entity_id=anchor["entity_id"],
+                    role=participant.role or "",
+                    source="participant",
+                )
+            if not bound:
+                for cand in fallback_by_event.get(record.event_id, []):
+                    normalized = cand.get("normalized_name")
+                    anchor = anchor_by_name.get(normalized or "")
+                    if anchor is None:
+                        continue
+                    bound.add(normalized or "")
+                    storage.add_event_mention(
+                        event_id=record.event_id,
+                        chunk_id=chunk.chunk_id,
+                        file_id=chunk.file_id,
+                        entity_id=anchor["entity_id"],
+                        role="",
+                        source="fallback",
+                    )
 
     async def _persist_chunk_repo(self, kb_id: str, item: _PendingGraphWrite) -> None:
         """Persist one chunk's records to the SQLite graph repository."""
@@ -955,6 +1356,8 @@ class GraphService:
 
         Entities kept alive by mentions alone are preserved (they may be
         shared across files), matching YUSU's orphan-cleanup semantics.
+        事件路径适配（N3 修复）：锚点由 chunk→entity MENTIONS 与 event→entity
+        EVENT_MENTIONS 两条边保住，任何一条存在即非孤儿。
         """
         entity_ids = {entity["entity_id"] for entity in storage.iter_entities()}
         related_ids: set[str] = set()
@@ -964,6 +1367,9 @@ class GraphService:
         for entity_id in entity_ids:
             if storage.chunk_lookup_1hop([entity_id]):
                 related_ids.add(entity_id)
+        for _, _, eattr in storage._graph.edges(data=True):
+            if eattr.get("edge_type") == "EVENT_MENTIONS" and eattr.get("entity_id"):
+                related_ids.add(eattr["entity_id"])
         orphans = sorted(entity_ids - related_ids)
         if orphans:
             entity_store = await self.get_vector_store(kb_id, "entity")
@@ -1064,6 +1470,57 @@ class GraphService:
 
     # --- reset / delete / lazy access -------------------------------------
 
+    async def search_event_paths(
+        self,
+        kb_id: str,
+        query_text: str,
+        *,
+        top_k: int = 5,
+        beam_width: int = 8,
+        max_hops: int = 5,
+        event_top_k: int = 64,
+        min_value_weight: float = 0.15,
+    ) -> list[dict[str, Any]]:
+        """Beam 多跳事件检索编排（S7）：事件向量召回种子 → beam search。
+
+        返回序列化为 dict 的 MultiHopPath 列表（每跳含可解释性四要素）。
+        图未构建或事件向量为空时返回 []。
+        """
+        from yusu_kb.knowledge.graphs.event_expand import (
+            build_expand_fn,
+            seed_events_from_hits,
+        )
+        from yusu_kb.knowledge.graphs.multi_hop import MultiHopConfig, run_beam_search
+
+        storage = self.get_storage(kb_id)
+        if not storage.is_built():
+            return []
+        event_store = await self.get_vector_store(kb_id, "event")
+        hits = await event_store.search(query_text, event_top_k)
+        hit_score_by_id = {
+            str(hit.get("id")): float(hit.get("score") or 0.0) for hit in hits if hit.get("id")
+        }
+        seeds = seed_events_from_hits(storage, hits, min_value_weight=min_value_weight, top_n=beam_width)
+        if not seeds:
+            return []
+        # 种子相似度：检索侧命中分 × value_weight（G4 第一落点，与边权缩放解耦），
+        # 缺失时置 0（不参与打分，纯结构路径仍可产出）
+        sim_lookup = {
+            seed.event_id: float(
+                (hit_score_by_id.get(seed.event_id) or 0.0) * seed.value_weight
+            )
+            for seed in seeds
+        }
+        config = MultiHopConfig(
+            beam_width=beam_width,
+            max_hops=max_hops,
+            min_value_weight=min_value_weight,
+            top_k_paths=top_k,
+        )
+        expand = build_expand_fn(storage)
+        paths = await run_beam_search(seeds, sim_lookup, expand, config)
+        return [path.model_dump() for path in paths]
+
     async def reset(
         self, kb_id: str, *, clear_extraction_result: bool, clear_config: bool
     ) -> dict[str, Any]:
@@ -1072,7 +1529,7 @@ class GraphService:
         async with lock:
             await self._cancel_build_if_running(kb_id)
             self._drop_storage(kb_id)
-            for kind in ("entity", "triple"):
+            for kind in ("entity", "triple", "event"):
                 store = self._vector_stores.get(kb_id, {}).pop(kind, None)
                 if store is not None:
                     try:
@@ -1116,6 +1573,12 @@ class GraphService:
         await entity_store.delete_ids(orphan_entity_ids)
         triple_store = await self.get_vector_store(kb_id, "triple")
         await triple_store.delete_ids(orphan_refs["orphan_triple_ids"])
+        # 事件向量按文件清理（事件 id 携带 file 信息，直接查存储节点收集）
+        event_store = await self.get_vector_store(kb_id, "event")
+        event_ids = [
+            event["event_id"] for event in storage.iter_events() if event.get("file_id") == file_id
+        ]
+        await event_store.delete_ids(event_ids)
         storage.save()
 
     def get_storage(self, kb_id: str) -> NetworkXGraphStorage:
@@ -1128,7 +1591,7 @@ class GraphService:
         return storage
 
     async def get_vector_store(self, kb_id: str, kind: str) -> GraphVectorStore:
-        """Lazily initialize the graph vector store for a kind (entity/triple)."""
+        """Lazily initialize the graph vector store for a kind (entity/triple/event)."""
         existing = self._vector_stores.get(kb_id, {}).get(kind)
         if existing is not None:
             return existing

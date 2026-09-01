@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from yusu_kb.api.deps import ChatModelDep, ManagerDep, verify_api_key
+from yusu_kb.knowledge.graphs.connectivity import evaluate_gate
 from yusu_kb.knowledge.graphs.graph_service import GRAPH_CONFIG_KEY, GraphService
 from yusu_kb.knowledge.implementations.local_kb import LocalKB
 from yusu_kb.models.chat import OpenAIChatAdapter
@@ -36,7 +37,7 @@ class ResetRequest(BaseModel):
 
 
 class ConfigureRequest(BaseModel):
-    extractor_type: str = "llm"
+    extractor_type: str = "event"
     extractor_options: dict[str, Any] | None = None
 
 
@@ -62,7 +63,7 @@ def _resolve_extractor_options(
     yet. Defaulting it to the chat model actually in use keeps the cache key
     correct while letting env-only deployments build graphs.
     """
-    if extractor_type != "llm":
+    if extractor_type not in ("llm", "event"):
         return options
     resolved = dict(options or {})
     if str(resolved.get("model_spec") or "").strip():
@@ -85,7 +86,7 @@ def _get_graph_service(kb: LocalKB, kb_id: str, chat_model) -> GraphService:
         kb_id=kb_id,
         work_dir=kb.work_dir,
         embed_func=kb._get_embedding_function(),
-        chat_model_fn=chat_model.call,
+        chat_model_fn=chat_model.call_collect,
     )
 
 
@@ -208,6 +209,12 @@ async def get_graph_stats(
     result = await service.get_status(kb_id)
     storage = service.get_storage(kb_id)
     result["storage"] = storage.get_stats() if storage.is_built() else None
+    # 连通性一等指标 + 门禁（事件化重构的验收口径）
+    if result["storage"] is not None:
+        connectivity = storage.get_connectivity()
+        gate_passed, gate_failures = evaluate_gate(connectivity)
+        result["connectivity"] = connectivity
+        result["gate"] = {"passed": gate_passed, "failures": gate_failures}
     return result
 
 
