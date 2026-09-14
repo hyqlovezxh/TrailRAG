@@ -393,9 +393,10 @@ uv run ruff check yusu_kb
 
 本项目（TrailRAG / 语溯RAG）参考了以下开源仓库的代码并依照各自开源协议署名：
 
-- **[Yuxi](https://github.com/xerrors/Yuxi)** —— 参考其知识库 / 知识图谱构建与检索能力。
+- **[Yuxi](https://github.com/xerrors/Yuxi)** —— 参考其智能体编排并作为本报告对比对象之一。
 - **[LightRAG](https://github.com/HKUDS/LightRAG)** —— 参考其图谱 WebUI 实现方式；并作为本报告对比对象之一。
-
+- **[semantica]([https://github.com/HKUDS/LightRAG](https://github.com/semantica-agi/semantica))** —— 作为本报告对比对象之一。
+- **[HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG)** —— 参考其知识库实现。
 同时对比参考了 **[Microsoft GraphRAG](https://github.com/microsoft/graphrag)** 的架构设计。
 
 ---
